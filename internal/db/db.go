@@ -13,7 +13,9 @@ type DeployTask struct {
 	ID            string     `json:"id" db:"id"`
 	ProjectOwner  string     `json:"project_owner" db:"project_owner"`
 	ProjectName   string     `json:"project_name" db:"project_name"`
-	SubProject    string     `json:"sub_project" db:"sub_project"`
+	SubProject    string     `json:"component" db:"sub_project"`
+	TargetKey     string     `json:"target" db:"target_key"`
+	ServerKey     string     `json:"server" db:"server_key"`
 	Branch        string     `json:"branch" db:"branch"`
 	CommitMessage string     `json:"commit_message" db:"commit_message"`
 	CommitTime    *time.Time `json:"commit_time" db:"commit_time"`
@@ -41,6 +43,8 @@ CREATE TABLE IF NOT EXISTS deploy_tasks (
     project_owner TEXT NOT NULL,
     project_name TEXT NOT NULL,
     sub_project TEXT DEFAULT '',
+    target_key TEXT DEFAULT '',
+    server_key TEXT DEFAULT '',
     branch TEXT NOT NULL,
     commit_message TEXT DEFAULT '',
     commit_time DATETIME,
@@ -57,6 +61,8 @@ CREATE TABLE IF NOT EXISTS deploy_tasks (
 const createIndexesSQL = `
 CREATE INDEX IF NOT EXISTS idx_deploy_tasks_project ON deploy_tasks(project_name);
 CREATE INDEX IF NOT EXISTS idx_deploy_tasks_sub_project ON deploy_tasks(sub_project);
+CREATE INDEX IF NOT EXISTS idx_deploy_tasks_target ON deploy_tasks(target_key);
+CREATE INDEX IF NOT EXISTS idx_deploy_tasks_server ON deploy_tasks(server_key);
 CREATE INDEX IF NOT EXISTS idx_deploy_tasks_environment ON deploy_tasks(environment);
 CREATE INDEX IF NOT EXISTS idx_deploy_tasks_status ON deploy_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_deploy_tasks_created_at ON deploy_tasks(created_at);
@@ -72,6 +78,14 @@ ALTER TABLE deploy_tasks ADD COLUMN commit_message TEXT DEFAULT '';
 
 const migrateAddCommitTimeSQL = `
 ALTER TABLE deploy_tasks ADD COLUMN commit_time DATETIME;
+`
+
+const migrateAddTargetKeySQL = `
+ALTER TABLE deploy_tasks ADD COLUMN target_key TEXT DEFAULT '';
+`
+
+const migrateAddServerKeySQL = `
+ALTER TABLE deploy_tasks ADD COLUMN server_key TEXT DEFAULT '';
 `
 
 // InitDB opens a SQLite database at the given path and creates the deploy_tasks
@@ -102,6 +116,8 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	_, _ = db.Exec(migrateAddSubProjectSQL) // Ignore error if column already exists
 	_, _ = db.Exec(migrateAddCommitMessageSQL)
 	_, _ = db.Exec(migrateAddCommitTimeSQL)
+	_, _ = db.Exec(migrateAddTargetKeySQL)
+	_, _ = db.Exec(migrateAddServerKeySQL)
 
 	if _, err := db.Exec(createIndexesSQL); err != nil {
 		db.Close()
@@ -115,8 +131,8 @@ func InitDB(dbPath string) (*sql.DB, error) {
 // The task's CreatedAt and UpdatedAt fields are stored as RFC3339 strings.
 func CreateTask(db *sql.DB, task *DeployTask) error {
 	query := `
-		INSERT INTO deploy_tasks (id, project_owner, project_name, sub_project, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO deploy_tasks (id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	var commitTime *string
 	if task.CommitTime != nil {
@@ -134,6 +150,8 @@ func CreateTask(db *sql.DB, task *DeployTask) error {
 		task.ProjectOwner,
 		task.ProjectName,
 		task.SubProject,
+		task.TargetKey,
+		task.ServerKey,
 		task.Branch,
 		task.CommitMessage,
 		commitTime,
@@ -155,7 +173,7 @@ func CreateTask(db *sql.DB, task *DeployTask) error {
 // Returns nil and an error if the task is not found.
 func GetTaskByID(db *sql.DB, id string) (*DeployTask, error) {
 	query := `
-		SELECT id, project_owner, project_name, sub_project, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at
+		SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at
 		FROM deploy_tasks WHERE id = ?
 	`
 	row := db.QueryRow(query, id)
@@ -170,6 +188,8 @@ func GetTaskByID(db *sql.DB, id string) (*DeployTask, error) {
 		&task.ProjectOwner,
 		&task.ProjectName,
 		&task.SubProject,
+		&task.TargetKey,
+		&task.ServerKey,
 		&task.Branch,
 		&task.CommitMessage,
 		&commitTime,
@@ -328,7 +348,7 @@ func ListRecords(db *sql.DB, filter RecordFilter) ([]DeployTask, int, error) {
 
 	// Get paginated records.
 	offset := (filter.Page - 1) * filter.PageSize
-	dataQuery := "SELECT id, project_owner, project_name, sub_project, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at FROM deploy_tasks " +
+	dataQuery := "SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at FROM deploy_tasks " +
 		where + " ORDER BY created_at DESC LIMIT ? OFFSET ?"
 	dataArgs := append(args, filter.PageSize, offset)
 
@@ -350,6 +370,8 @@ func ListRecords(db *sql.DB, filter RecordFilter) ([]DeployTask, int, error) {
 			&task.ProjectOwner,
 			&task.ProjectName,
 			&task.SubProject,
+			&task.TargetKey,
+			&task.ServerKey,
 			&task.Branch,
 			&task.CommitMessage,
 			&commitTime,
@@ -421,7 +443,7 @@ func ListAllRecords(db *sql.DB, filter RecordFilter) ([]DeployTask, int, error) 
 		return nil, 0, fmt.Errorf("failed to count records: %w", err)
 	}
 
-	dataQuery := "SELECT id, project_owner, project_name, sub_project, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at FROM deploy_tasks " +
+	dataQuery := "SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at FROM deploy_tasks " +
 		where + " ORDER BY created_at DESC"
 	rows, err := db.Query(dataQuery, args...)
 	if err != nil {
@@ -449,6 +471,8 @@ func scanDeployTasks(rows *sql.Rows) ([]DeployTask, error) {
 			&task.ProjectOwner,
 			&task.ProjectName,
 			&task.SubProject,
+			&task.TargetKey,
+			&task.ServerKey,
 			&task.Branch,
 			&task.CommitMessage,
 			&commitTime,

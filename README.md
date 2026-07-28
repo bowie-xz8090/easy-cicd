@@ -6,7 +6,8 @@
 
 - **免登录使用** — 打开页面即可操作，无需账号密码
 - **Gitea 集成** — 自动获取 Gitea 上的项目列表和分支列表
-- **多环境部署** — 支持 dev（开发）、sit（测试）、prod（生产）三个环境，每个环境对应不同的目标服务器
+- **多环境、多目标部署** — 开发/测试可自动选唯一服务器，生产环境可由用户选择具体部署目标
+- **真实组件选择** — 单体仓库直接选择项目，前端 Monorepo 再选择 `apps` 下的独立组件
 - **SSH 密码认证** — 通过密码登录目标服务器，无需配置免密登录
 - **自动化流程** — 代码拉取 → 构建 → 上传产物 → 执行部署脚本，全程自动
 - **实时状态跟踪** — 页面每 5 秒轮询，实时展示部署进度
@@ -87,84 +88,84 @@ cp config.example.yaml config.yaml
 
 所有配置集中在一个 `config.yaml` 文件中，默认放在可执行文件同级目录。也可以通过环境变量指定路径。
 
-### 完整配置示例
+配置采用版本 2 模型，完整可运行示例见 `config.example.yaml`。核心关系如下：
+
+```text
+项目/真实组件 + 环境
+  ├─ build：共享的构建命令与产物
+  └─ deployments
+       ├─ 目标 A → 服务器 A + 部署脚本 A
+       └─ 目标 B → 服务器 B + 部署脚本 B
+```
+
+精简示例：
 
 ```yaml
-# ============================================================
-# 服务配置
-# ============================================================
-server:
-  port: 8080              # 平台监听端口，浏览器访问此端口
-  workspace: "./workspace" # 代码克隆和构建的工作目录（需要写权限）
+config_version: 2
 
-# ============================================================
-# Gitea 配置
-# ============================================================
-gitea:
-  url: "http://192.168.1.100:3000"    # Gitea 服务地址（不带尾部斜杠）
-  token: "abc123def456ghi789"          # Gitea API Access Token
+servers:
+  prod-main:
+    label: "生产主站"
+    host: "192.168.1.30"
+    port: 22
+    user: root
+    password: "change-me"
+    deploy_path: "/root/temp"
+  prod-region:
+    label: "生产区域节点"
+    host: "192.168.1.31"
+    port: 22
+    user: root
+    password: "change-me"
+    deploy_path: "/data/temp"
 
-# ============================================================
-# 环境配置 — 每个环境对应一台目标服务器
-# 支持的环境 key：dev、sit、prod
-# ============================================================
 environments:
-  dev:
-    label: "开发环境"                   # 页面上显示的中文名称
-    server:
-      host: "192.168.1.10"            # 目标服务器 IP 地址
-      port: 22                         # SSH 端口
-      user: "root"                     # SSH 登录用户名
-      password: "Dev@2024"             # SSH 登录密码
-      deploy_path: "/opt/apps"         # 产物上传到服务器的目标目录
-
-  sit:
-    label: "集成测试环境"
-    server:
-      host: "192.168.1.20"
-      port: 22
-      user: "root"
-      password: "Sit@2024"
-      deploy_path: "/opt/apps"
-
   prod:
     label: "生产环境"
-    server:
-      host: "192.168.1.30"
-      port: 22
-      user: "root"
-      password: "Prod@2024"
-      deploy_path: "/opt/apps"
+    disabled: false
+    servers: [prod-main, prod-region]
+    links: { user_url: "", admin_url: "", extra: [] }
 
-# ============================================================
-# 项目配置 — 每个项目的构建和部署方式
-# key 必须和 Gitea 上的仓库名一致
-# ============================================================
 projects:
-  my-frontend:
-    build_cmd: "npm install && npm run build"   # 构建命令
-    build_output: "./dist"                       # 构建产物路径（相对于项目根目录）
-    deploy_script: |                             # 部署后在目标服务器上执行的脚本
-      cd /opt/apps/my-frontend
-      tar -xzf dist.tar.gz
-      nginx -s reload
-
   my-backend:
-    build_cmd: "go build -o server ./cmd/"
-    build_output: "./server"
-    deploy_script: |
-      cd /opt/apps/my-backend
-      chmod +x server
-      systemctl restart my-backend
+    label: "后端服务"
+    mode: single
+    build_type: backend
+    environments:
+      prod:
+        build:
+          command: "mvn clean package -DskipTests -Pprod"
+          artifacts:
+            - { key: app, output: "./target/app.jar", upload_as: "app.jar" }
+        deployments:
+          prod-main:
+            label: "生产主站"
+            server: prod-main
+            script: "systemctl restart my-backend"
+          prod-region:
+            label: "生产区域节点"
+            server: prod-region
+            script: "systemctl restart my-backend-region"
 
-  my-java-app:
-    build_cmd: "mvn clean package -DskipTests"
-    build_output: "./target/app.jar"
-    deploy_script: |
-      cd /opt/apps/my-java-app
-      systemctl stop my-java-app
-      cp app.jar app-running.jar
-      systemctl start my-java-app
+  my-frontend:
+    label: "前端 Monorepo"
+    mode: monorepo
+    components:
+      user-ui:
+        label: "用户端"
+        path: "apps/user-ui"
+        build_type: frontend
+        environments:
+          prod:
+            build:
+              command: "pnpm build:prod --filter user-ui"
+              artifacts:
+                - { key: web, output: "./apps/user-ui/dist", upload_as: "user-ui.tar.gz" }
+            deployments:
+              prod-main:
+                label: "生产主站"
+                server: prod-main
+                script: "tar -xzf /root/temp/user-ui.tar.gz -C /srv/user-ui"
 ```
 
 ### 配置项详解
@@ -189,29 +190,33 @@ projects:
 3. 在「管理 Access Token」中输入名称，点击「生成令牌」
 4. 复制生成的 Token 填入配置文件
 
+#### servers（服务器资源）
+
+服务器只保存连接信息和上传目录，不再承担项目或组件的语义。`password` 不会通过配置管理 API 返回。
+
 #### environments（环境配置）
 
-每个环境的 `server` 配置：
+`servers` 是该环境允许使用的服务器 key 列表。开发/测试环境通常配置一台，生产环境可配置多台；`disabled` 控制整个环境是否开放部署。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `host` | string | 是 | 目标服务器 IP 地址或域名 |
-| `port` | int | 是 | SSH 端口，通常为 `22` |
-| `user` | string | 是 | SSH 登录用户名 |
-| `password` | string | 是 | SSH 登录密码 |
-| `deploy_path` | string | 是 | 产物上传到服务器的目标目录，需要提前创建且有写权限 |
+#### projects（项目与组件）
 
-> **安全提示**：配置文件中包含服务器密码，请确保 `config.yaml` 的文件权限设置为仅所有者可读（`chmod 600 config.yaml`）。
+- `mode: single`：项目本身就是部署单元，直接配置 `environments`。
+- `mode: monorepo`：在 `components` 中声明 `apps` 下真实、独立的组件；不得为了区分服务器脚本创建伪组件。
+- `build`：归属“项目/组件 + 环境”，描述一次共享构建。
+- `deployments`：归属具体环境，每个目标绑定一台服务器和一份部署脚本。
+- 所有构建产物上传完成后，平台只执行一次所选目标的 `script`。
 
-#### projects（项目配置）
+`projects` 下的 key 必须和 Gitea 仓库名完全一致。`components` 的 key 建议和 `apps` 目录名一致。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `build_cmd` | string | 是 | 构建命令，在项目根目录下执行。会设置环境变量 `BUILD_ENV=dev/sit/prod` |
-| `build_output` | string | 是 | 构建产物路径，相对于项目根目录 |
-| `deploy_script` | string | 是 | 部署脚本，产物上传后在目标服务器上通过 SSH 执行 |
+旧版 `sub_projects/env_overrides` 配置可以使用迁移命令转换：
 
-**重要**：`projects` 下的 key（如 `my-frontend`）必须和 Gitea 上的仓库名完全一致，否则系统找不到对应的构建配置。
+```bash
+go run ./cmd/config-migrate -config config.yaml -write
+```
+
+迁移会根据构建命令或产物路径中的 `apps/<name>` 合并别名，例如把仅用于区分服务器的 `mult-onlyone-ui` 合并回真实组件 `cde-onlyone-ui`。
+
+> **安全提示**：配置文件中包含 Gitea Token、部署密码和服务器凭据，请限制 `config.yaml` 的文件权限。
 
 ### 环境变量
 
@@ -497,10 +502,11 @@ docker compose up -d --build
 
 ### 部署操作（首页）
 
-1. **选择项目** — 下拉框会自动从 Gitea 加载所有仓库
-2. **选择分支** — 选择项目后自动加载该项目的分支列表
+1. **选择项目/组件** — 单体项目在级联选择器第一层直接选中；Monorepo 在第二层选择真实组件
+2. **选择分支或 Tag** — 选择部署单元后自动加载代码引用
 3. **选择环境** — 选择 dev / sit / prod
-4. **点击「部署」** — 三项全选后按钮才可点击
+4. **选择部署服务器** — 只有一个目标时自动选中，多个目标时必须手动选择
+5. **点击「部署」** — 项目、代码引用、环境和目标完整后才可触发
 
 点击部署后，页面会实时显示任务状态：
 
@@ -528,14 +534,14 @@ docker compose up -d --build
    从 Gitea 克隆或拉取指定项目的指定分支到 workspace 目录
 
 2. 执行构建
-   在项目目录中执行 config.yaml 中配置的 build_cmd
+   执行所选“项目/组件 + 环境”的 build.command
    环境变量 BUILD_ENV 会被设置为 dev/sit/prod
 
 3. 上传产物
-   通过 SSH（密码认证）将 build_output 指定的文件上传到目标服务器的 deploy_path
+   准备 build.artifacts，并将全部产物上传到所选服务器的 deploy_path
 
 4. 执行部署脚本
-   通过 SSH 在目标服务器上执行 deploy_script 中配置的命令
+   全部产物上传成功后，仅执行所选 deployment.script
 ```
 
 任何一个阶段失败，任务会标记为「失败」并记录错误信息。
@@ -623,11 +629,15 @@ auto-deploy-platform/
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/projects` | 获取 Gitea 项目列表 |
 | GET | `/api/projects/:owner/:repo/branches` | 获取项目分支列表 |
-| GET | `/api/environments` | 获取环境列表 |
+| GET | `/api/projects/:owner/:repo/tags` | 获取项目 Tag 列表 |
+| GET | `/api/environments?project=&component=` | 获取环境及部署目标 |
 | POST | `/api/deploy` | 触发部署任务 |
 | GET | `/api/deploy/:id/status` | 获取任务状态 |
 | GET | `/api/deploy/:id/logs` | 获取任务日志 |
 | GET | `/api/deploy/records` | 获取部署历史（支持筛选和分页） |
+| GET | `/api/config/editor` | 获取安全可编辑的配置视图（需要 admin_token） |
+| PUT | `/api/config/projects` | 更新项目、组件、构建与部署目标（需要 admin_token） |
+| PUT | `/api/config/environments/:key` | 更新环境访问与服务器范围（需要 admin_token） |
 | PUT | `/api/config` | 修改配置（需要 admin_token 鉴权） |
 | POST | `/api/config/reload` | 从磁盘重新加载配置（需要 admin_token 鉴权） |
 | POST | `/api/webhook/gitea` | Gitea Webhook 回调（push 事件自动触发部署） |
@@ -642,38 +652,9 @@ auto-deploy-platform/
 admin_token: "your-secure-random-string"
 ```
 
-#### 修改配置（PUT /api/config）
+Web 配置管理页使用分区接口更新环境范围和项目规则，连接凭据不会返回浏览器。保存前会校验项目模式、环境、构建产物、部署目标和服务器关联；成功后同时更新内存与 `config.yaml`，新任务立即使用最新配置。
 
-提交完整配置 JSON，验证通过后同时更新内存和磁盘文件，立即生效。
-
-```bash
-curl -X PUT http://localhost:8080/api/config \
-  -H "Authorization: Bearer your-secure-random-string" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "server": {"port": 8080, "workspace": "/app/workspace"},
-    "gitea": {"url": "http://gitea.example.com", "token": "new-token"},
-    "environments": {
-      "dev": {
-        "label": "开发环境",
-        "server": {"host": "192.168.1.10", "port": 22, "user": "deploy", "password": "new-pass", "deploy_path": "/opt/apps"}
-      }
-    },
-    "projects": {
-      "my-project": {
-        "build_cmd": "npm run build",
-        "build_output": "./dist",
-        "deploy_script": "systemctl restart my-project"
-      }
-    }
-  }'
-```
-
-**注意事项：**
-- 必须提交完整配置（全量替换，不是局部更新）
-- `gitea.url`、`gitea.token` 不能为空，`environments` 至少要有一个
-- `server.port` 修改需要重启服务才能生效，其他配置立即生效
-- 新的部署任务会自动使用最新配置（环境、项目、服务器信息等）
+`PUT /api/config` 仍保留给运维脚本做完整配置替换。调用方必须提交完整配置，并注意 `server.port` 的修改需要重启进程才能生效。
 
 #### 从磁盘重载配置（POST /api/config/reload）
 

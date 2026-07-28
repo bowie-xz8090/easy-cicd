@@ -1,169 +1,172 @@
+config_version: 2
+
 server:
   port: 8080
   workspace: "./workspace"
   title: "自动部署平台"
+  base_path: ""
 
 admin_token: "change-me-to-a-secure-random-string"
-webhook_secret: "change-me-to-webhook-secret"
 
 gitea:
   url: "http://gitea.example.com"
   username: "your-username"
   token: "your-access-token"
 
-# 服务器集中定义，多个项目可以引用同一个 server key，避免重复配置
+# 服务器是独立资源。生产环境可以关联多台服务器。
 servers:
-  dev-server-a:
+  dev-main:
+    label: "开发服务器"
     host: "192.168.1.10"
     port: 22
     user: "root"
     password: "your-ssh-password"
     deploy_path: "/root/temp"
-  dev-server-b:
-    host: "192.168.1.11"
-    port: 22
-    user: "root"
-    password: "your-ssh-password"
-    deploy_path: "/root/temp"
-  sit-server:
+  sit-main:
+    label: "测试服务器"
     host: "192.168.1.20"
     port: 22
     user: "root"
     password: "your-ssh-password"
     deploy_path: "/root/temp"
-  prod-server:
+  prod-main:
+    label: "生产主站"
     host: "192.168.1.30"
     port: 22
     user: "root"
     password: "your-ssh-password"
     deploy_path: "/root/temp"
+  prod-region:
+    label: "生产区域节点"
+    host: "192.168.1.31"
+    port: 22
+    user: "root"
+    password: "your-ssh-password"
+    deploy_path: "/data/temp"
 
-# environments 仅定义环境的显示信息（标签、链接）
+# 环境只维护访问入口、部署开关和允许使用的服务器范围。
 environments:
   dev:
     label: "开发环境"
     disabled: false
+    servers: [dev-main]
     links:
       user_url: "http://dev.example.com"
       admin_url: "http://dev-admin.example.com"
+      extra: []
   sit:
     label: "测试环境"
     disabled: false
+    servers: [sit-main]
     links:
       user_url: "http://sit.example.com"
       admin_url: "http://sit-admin.example.com"
+      extra: []
   prod:
     label: "生产环境"
-    disabled: true
+    disabled: false
+    servers: [prod-main, prod-region]
     links:
-      user_url: "http://prod.example.com"
-      admin_url: "http://prod-admin.example.com"
+      user_url: "https://www.example.com"
+      admin_url: "https://admin.example.com"
+      extra: []
+    password: "change-me"
 
 projects:
-  # 后端项目（无子项目），通过 server 字段引用 servers 中的 key
+  # single：项目本身就是可部署单元，不再创建 default/main 等伪子项目。
   my-backend:
-    env_overrides:
+    label: "后端服务"
+    mode: single
+    build_type: backend
+    environments:
       dev:
-        build_cmd: "mvn clean package -DskipTests -Pdev"
-        build_output: "./target/app.jar"
-        rename_to: "app.jar"
-        deploy_script: "docker cp /root/temp/app.jar my-server:/app/app.jar && docker restart my-server"
-        server: "dev-server-a"
+        build:
+          command: "mvn clean package -DskipTests -Pdev"
+          artifacts:
+            - key: app
+              output: "./target/app.jar"
+              upload_as: "app.jar"
+        deployments:
+          dev-main:
+            label: "开发服务器"
+            server: dev-main
+            script: "systemctl restart my-backend"
       sit:
-        build_cmd: "mvn clean package -DskipTests -Psit"
-        build_output: "./target/app.jar"
-        rename_to: "app-latest.jar"
-        deploy_script: "systemctl restart my-backend"
-        server: "sit-server"
+        build:
+          command: "mvn clean package -DskipTests -Psit"
+          artifacts:
+            - key: app
+              output: "./target/app.jar"
+              upload_as: "app.jar"
+        deployments:
+          sit-main:
+            label: "测试服务器"
+            server: sit-main
+            script: "systemctl restart my-backend"
       prod:
-        build_cmd: "mvn clean package -DskipTests -Pprod"
-        build_output: "./target/app.jar"
-        rename_to: "app.jar"
-        deploy_script: "docker cp /root/temp/app.jar my-server:/app/app.jar && docker restart my-server"
-        server: "prod-server"
+        build:
+          command: "mvn clean package -DskipTests -Pprod"
+          artifacts:
+            - key: app
+              output: "./target/app.jar"
+              upload_as: "app.jar"
+        deployments:
+          prod-main:
+            label: "生产主站"
+            server: prod-main
+            script: "systemctl restart my-backend"
+          prod-region:
+            label: "生产区域节点"
+            server: prod-region
+            script: "systemctl restart my-backend-region"
 
-  # 前端 monorepo（有子项目），每个子项目可以引用不同的 server
+  # monorepo：components 只对应 apps 下真实、独立的应用。
   my-frontend:
-    sub_projects:
+    label: "前端 Monorepo"
+    mode: monorepo
+    components:
       user-ui:
         label: "用户端"
-        env_overrides:
+        path: "apps/user-ui"
+        build_type: frontend
+        environments:
           dev:
-            build_cmd: "pnpm install && pnpm build:dev --filter user-ui"
-            artifacts:
-              - build_output: "./apps/user-ui/dist"
-                rename_to: "user-ui.tar.gz"
-                deploy_script: "tar -xzf /root/temp/user-ui.tar.gz -C /tmp && docker cp /tmp/dist/. nginx:/usr/share/nginx/html/ && rm -rf /tmp/dist && docker restart nginx"
-            server: "dev-server-a"
+            build:
+              command: "pnpm install && pnpm build:dev --filter user-ui"
+              artifacts:
+                - key: web
+                  output: "./apps/user-ui/dist"
+                  upload_as: "user-ui.tar.gz"
+            deployments:
+              dev-main:
+                label: "开发服务器"
+                server: dev-main
+                script: "tar -xzf /root/temp/user-ui.tar.gz -C /srv/user-ui"
           sit:
-            build_cmd: "pnpm install && pnpm build:sit --filter user-ui"
-            artifacts:
-              - build_output: "./apps/user-ui/dist"
-                rename_to: "user-ui.tar.gz"
-                deploy_script: "nginx -s reload"
-            server: "sit-server"
+            build:
+              command: "pnpm install && pnpm build:sit --filter user-ui"
+              artifacts:
+                - key: web
+                  output: "./apps/user-ui/dist"
+                  upload_as: "user-ui.tar.gz"
+            deployments:
+              sit-main:
+                label: "测试服务器"
+                server: sit-main
+                script: "tar -xzf /root/temp/user-ui.tar.gz -C /srv/user-ui"
           prod:
-            build_cmd: "pnpm install && pnpm build:prod --filter user-ui"
-            artifacts:
-              - build_output: "./apps/user-ui/dist"
-                rename_to: "user-ui.tar.gz"
-                deploy_script: "docker restart nginx"
-            server: "prod-server"
-
-      admin-ui:
-        label: "管理端"
-        env_overrides:
-          dev:
-            build_cmd: "pnpm install && pnpm build:dev --filter admin-ui"
-            artifacts:
-              - build_output: "./apps/admin-ui/dist"
-                rename_to: "admin-ui.tar.gz"
-                deploy_script: "docker restart nginx-admin"
-            server: "dev-server-b"
-          sit:
-            build_cmd: "pnpm install && pnpm build:sit --filter admin-ui"
-            artifacts:
-              - build_output: "./apps/admin-ui/dist"
-                rename_to: "admin-ui.tar.gz"
-                deploy_script: "nginx -s reload"
-            server: "sit-server"
-          prod:
-            build_cmd: "pnpm install && pnpm build:prod --filter admin-ui"
-            artifacts:
-              - build_output: "./apps/admin-ui/dist"
-                rename_to: "admin-ui.tar.gz"
-                deploy_script: "docker restart nginx-admin"
-            server: "prod-server"
-
-    # 全部部署时的配置
-    env_overrides:
-      dev:
-        build_cmd: "pnpm install && pnpm build:dev"
-        artifacts:
-          - build_output: "./apps/user-ui/dist"
-            rename_to: "user-ui.tar.gz"
-            deploy_script: "docker restart nginx"
-          - build_output: "./apps/admin-ui/dist"
-            rename_to: "admin-ui.tar.gz"
-            deploy_script: "docker restart nginx-admin"
-        server: "dev-server-a"
-      sit:
-        build_cmd: "pnpm install && pnpm build:sit"
-        artifacts:
-          - build_output: "./apps/user-ui/dist"
-            rename_to: "user-ui.tar.gz"
-            deploy_script: "nginx -s reload"
-          - build_output: "./apps/admin-ui/dist"
-            rename_to: "admin-ui.tar.gz"
-            deploy_script: "nginx -s reload"
-        server: "sit-server"
-      prod:
-        build_cmd: "pnpm install && pnpm build:prod"
-        artifacts:
-          - build_output: "./apps/user-ui/dist"
-            rename_to: "user-ui.tar.gz"
-            deploy_script: "docker restart nginx"
-          - build_output: "./apps/admin-ui/dist"
-            rename_to: "admin-ui.tar.gz"
-            deploy_script: "docker restart nginx-admin"
-        server: "prod-server"
+            build:
+              command: "pnpm install && pnpm build:prod --filter user-ui"
+              artifacts:
+                - key: web
+                  output: "./apps/user-ui/dist"
+                  upload_as: "user-ui.tar.gz"
+            deployments:
+              prod-main:
+                label: "生产主站"
+                server: prod-main
+                script: "tar -xzf /root/temp/user-ui.tar.gz -C /srv/user-ui"
+              prod-region:
+                label: "生产区域节点"
+                server: prod-region
+                script: "tar -xzf /data/temp/user-ui.tar.gz -C /srv/user-ui"

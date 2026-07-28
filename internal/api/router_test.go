@@ -161,17 +161,29 @@ func TestHandleClearDeployHistory_RejectsActiveTasks(t *testing.T) {
 }
 
 func testConfig() *config.AppConfig {
+	devRule := config.UnitEnvConfig{
+		Build: config.BuildConfig{
+			BuildCmd:  "go build ./...",
+			Artifacts: []config.ArtifactConfig{{Key: "app", BuildOutput: "app.tar.gz", RenameTo: "app.tar.gz"}},
+		},
+		Deployments: map[string]config.DeploymentConfig{
+			"dev-server": {Label: "开发服务器", Server: "dev-server", DeployScript: "echo deploy"},
+		},
+	}
 	return &config.AppConfig{
+		ConfigVersion: config.CurrentVersion,
 		Servers: map[string]config.ServerConfig{
 			"dev-server": {
-				Host: "192.168.1.10",
-				Port: 22,
-				User: "deploy",
+				Label: "开发服务器",
+				Host:  "192.168.1.10",
+				Port:  22,
+				User:  "deploy",
 			},
 		},
 		Environments: map[string]config.EnvConfig{
 			"dev": {
-				Label: "开发环境",
+				Label:   "开发环境",
+				Servers: []string{"dev-server"},
 			},
 			"sit": {
 				Label: "集成测试环境",
@@ -182,29 +194,41 @@ func testConfig() *config.AppConfig {
 		},
 		Projects: map[string]config.ProjectConfig{
 			"project-a": {
-				Label: "项目A",
-				SubProjects: map[string]config.SubProjectConfig{
-					"default": {
-						Label: "默认",
-						EnvOverrides: map[string]config.SubProjectEnvOverride{
-							"dev": {Server: "dev-server"},
-						},
-					},
-				},
+				Label:        "项目A",
+				Mode:         "single",
+				BuildType:    "backend",
+				Environments: map[string]config.UnitEnvConfig{"dev": devRule},
+				Components:   map[string]config.ComponentConfig{},
 			},
 			"project-b": {
-				Label: "项目B",
-				SubProjects: map[string]config.SubProjectConfig{
-					"default": {
-						Label: "默认",
-						EnvOverrides: map[string]config.SubProjectEnvOverride{
-							"dev": {Server: "dev-server"},
-						},
+				Label:        "项目B",
+				Mode:         "monorepo",
+				Environments: map[string]config.UnitEnvConfig{},
+				Components: map[string]config.ComponentConfig{
+					"web": {
+						Label:        "Web",
+						Path:         "apps/web",
+						BuildType:    "frontend",
+						Environments: map[string]config.UnitEnvConfig{"dev": devRule},
 					},
 				},
 			},
 		},
 	}
+}
+
+func TestEditableConfig_ServerSummaryIncludesConnectionAddress(t *testing.T) {
+	cfg := testConfig()
+	server := cfg.Servers["dev-server"]
+	server.DeployPath = "/root/temp"
+	cfg.Servers["dev-server"] = server
+
+	editable := editableConfig(cfg)
+
+	require.Len(t, editable.Servers, 1)
+	assert.Equal(t, "192.168.1.10", editable.Servers[0].Host)
+	assert.Equal(t, 22, editable.Servers[0].Port)
+	assert.Equal(t, "/root/temp", editable.Servers[0].DeployPath)
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -266,8 +290,10 @@ func TestListProjects_Success(t *testing.T) {
 	first := data[0].(map[string]interface{})
 	assert.Equal(t, "org", first["owner"])
 	assert.Equal(t, "project-a", first["name"])
-	assert.Equal(t, "项目A", first["project_label"])
-	assert.Equal(t, "默认", first["sub_project_label"])
+	assert.Equal(t, "项目A", first["label"])
+	assert.Equal(t, "single", first["mode"])
+	assert.Equal(t, true, first["selectable"])
+	assert.Empty(t, first["components"])
 }
 
 func TestListProjects_GiteaError(t *testing.T) {
@@ -404,6 +430,50 @@ func TestListEnvironments(t *testing.T) {
 	assert.Equal(t, "生产环境", keys["prod"])
 }
 
+func TestListEnvironmentsForSelectedProjectReturnsDeploymentTargets(t *testing.T) {
+	r := setupRouter(&mockGiteaClient{}, testConfig())
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/environments?project=project-a", nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var response struct {
+		Code int               `json:"code"`
+		Data []EnvironmentItem `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Equal(t, 0, response.Code)
+	require.NotEmpty(t, response.Data)
+
+	var dev EnvironmentItem
+	for _, environment := range response.Data {
+		if environment.Key == "dev" {
+			dev = environment
+			break
+		}
+	}
+	require.False(t, dev.Disabled)
+	require.Len(t, dev.Targets, 1)
+	assert.Equal(t, "dev-server", dev.Targets[0].Key)
+	assert.Equal(t, "dev-server", dev.Targets[0].Server)
+	assert.Equal(t, "开发服务器", dev.Targets[0].ServerLabel)
+	assert.Equal(t, "192.168.1.10", dev.Targets[0].ServerHost)
+	assert.Equal(t, 22, dev.Targets[0].ServerPort)
+}
+
+func TestListEnvironmentsForMonorepoRequiresRealComponent(t *testing.T) {
+	r := setupRouter(&mockGiteaClient{}, testConfig())
+
+	withoutComponent := httptest.NewRecorder()
+	r.ServeHTTP(withoutComponent, httptest.NewRequest(http.MethodGet, "/api/environments?project=project-b", nil))
+	assert.Contains(t, withoutComponent.Body.String(), `"disabled":true`)
+
+	withComponent := httptest.NewRecorder()
+	r.ServeHTTP(withComponent, httptest.NewRequest(http.MethodGet, "/api/environments?project=project-b&component=web", nil))
+	assert.Contains(t, withComponent.Body.String(), `"key":"dev-server"`)
+}
+
 func TestAllEndpoints_NoAuth(t *testing.T) {
 	mock := &mockGiteaClient{
 		repos:    []gitea.Repository{},
@@ -484,7 +554,7 @@ func TestHandleDeploy_Success(t *testing.T) {
 	}
 	r := setupRouterWithTaskMgr(&mockGiteaClient{}, testConfig(), taskMgr)
 
-	body := `{"project_owner":"org","project_name":"project-a","sub_project":"default","branch":"main","environment":"dev"}`
+	body := `{"project_owner":"org","project_name":"project-a","branch":"main","environment":"dev","target":"dev-server"}`
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodPost, "/api/deploy", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -530,7 +600,7 @@ func TestHandleDeploy_ValidationError(t *testing.T) {
 	}
 	r := setupRouterWithTaskMgr(&mockGiteaClient{}, testConfig(), taskMgr)
 
-	body := `{"project_owner":"","project_name":"project-a","sub_project":"default","branch":"main","environment":"dev"}`
+	body := `{"project_owner":"","project_name":"project-a","branch":"main","environment":"dev","target":"dev-server"}`
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodPost, "/api/deploy", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -545,13 +615,16 @@ func TestHandleDeploy_ValidationError(t *testing.T) {
 	assert.Contains(t, resp["message"], "project_owner must not be empty")
 }
 
-func TestHandleDeploy_RejectsDisabledSubProjectEnvironment(t *testing.T) {
+func TestHandleDeploy_RejectsDisabledDeploymentTarget(t *testing.T) {
 	cfg := testConfig()
 	disabled := true
-	cfg.Projects["project-a"].SubProjects["default"].EnvOverrides["dev"] = config.SubProjectEnvOverride{
-		Server:   "dev-server",
-		Disabled: &disabled,
-	}
+	project := cfg.Projects["project-a"]
+	rule := project.Environments["dev"]
+	deployment := rule.Deployments["dev-server"]
+	deployment.Disabled = &disabled
+	rule.Deployments["dev-server"] = deployment
+	project.Environments["dev"] = rule
+	cfg.Projects["project-a"] = project
 	taskMgr := &mockTaskManager{
 		createTaskFn: func(req task.DeployRequest) (*db.DeployTask, error) {
 			t.Fatal("disabled environment must not create a deployment task")
@@ -560,7 +633,7 @@ func TestHandleDeploy_RejectsDisabledSubProjectEnvironment(t *testing.T) {
 	}
 	r := setupRouterWithTaskMgr(&mockGiteaClient{}, cfg, taskMgr)
 
-	body := `{"project_owner":"org","project_name":"project-a","sub_project":"default","branch":"main","environment":"dev"}`
+	body := `{"project_owner":"org","project_name":"project-a","branch":"main","environment":"dev","target":"dev-server"}`
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/deploy", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")

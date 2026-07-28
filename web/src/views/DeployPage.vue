@@ -1,571 +1,355 @@
 <template>
   <div class="deploy-page">
-    <h1>部署操作</h1>
-    <p class="subtitle">选择项目、分支和环境后触发部署。</p>
+    <header class="page-heading">
+      <h1>部署操作</h1>
+      <p>依次选择项目、代码引用、环境和部署服务器。</p>
+    </header>
 
-    <!-- Error alert -->
-    <div v-if="errorMessage" class="error-alert" role="alert">
-      {{ errorMessage }}
-      <button class="error-close" @click="errorMessage = ''" aria-label="关闭错误提示">&times;</button>
+    <div v-if="errorMessage" class="alert error-alert" role="alert">{{ errorMessage }}</div>
+    <div v-if="deployResult && !showDeployStatus" class="alert success-alert" role="status">
+      部署已触发，任务 ID：{{ deployResult.task_id }}
     </div>
 
-    <!-- Success message -->
-    <div v-if="deployResult && !showDeployStatus" class="success-alert" role="status">
-      部署已触发，任务 ID：{{ deployResult.task_id }}，状态：{{ deployResult.status }}
-    </div>
-
-    <!-- Deploy status tracking -->
     <DeployStatus
       v-if="showDeployStatus && deployResult"
       :task-id="deployResult.task_id"
       @complete="onDeployComplete"
+      @close="showDeployStatus = false"
     />
 
     <form class="deploy-form" @submit.prevent="handleDeploy">
-      <!-- Project cascader -->
-      <div ref="projectCascaderRef" class="form-group project-cascader">
-        <label for="project-cascader">项目</label>
-        <button
-          id="project-cascader"
-          type="button"
-          class="cascader-trigger"
-          :class="{ 'cascader-trigger-open': isProjectCascaderOpen }"
+      <section class="form-step">
+        <div class="step-title"><span>1</span><strong>项目</strong></div>
+        <div ref="projectCascaderRef" class="project-cascader">
+          <button
+            id="project-cascader"
+            class="cascader-trigger"
+            type="button"
+            aria-label="项目"
           :disabled="loadingProjects"
           @click="toggleProjectCascader"
-        >
-          <span :class="{ 'cascader-placeholder': !selectedProject }">
-            {{ selectedProjectPath || '请选择项目 / 子项目' }}
-          </span>
-          <span class="cascader-arrow">›</span>
-        </button>
-        <span v-if="loadingProjects" class="loading-hint">加载项目列表中…</span>
-
-        <div
-          v-if="isProjectCascaderOpen"
-          class="cascader-panel"
-          :class="{ 'cascader-panel-expanded': activeProjectKey }"
-        >
-          <div class="cascader-column">
-            <button
-              v-for="project in projectGroups"
-              :key="project.key"
-              type="button"
-              class="cascader-option"
-              :class="{ 'cascader-option-active': activeProjectKey === project.key }"
-              @click="activeProjectKey = project.key"
-            >
-              <span class="cascader-option-content">
-                <span class="cascader-option-name">{{ project.name }}</span>
-                <span class="cascader-option-tags">
-                  <span
-                    v-for="tag in splitLabelTags(project.label)"
-                    :key="tag"
-                    class="label-chip label-chip-project"
-                  >
-                    {{ tag }}
-                  </span>
-                </span>
-              </span>
-              <span class="cascader-next">›</span>
-            </button>
-          </div>
-
-          <div v-if="activeProjectKey" class="cascader-column">
-            <button
-              v-for="project in activeProjectSubProjects"
-              :key="project.sub_project"
-              type="button"
-              class="cascader-option"
-              :class="{ 'cascader-option-active': selectedProject?.sub_project === project.sub_project && selectedProjectKey === activeProjectKey }"
-              @click="selectSubProject(project)"
-            >
-              <span class="cascader-option-content">
-                <span class="cascader-option-name">{{ project.sub_project }}</span>
-                <span class="cascader-option-tags">
-                  <span
-                    v-for="tag in splitLabelTags(subProjectLabel(project))"
-                    :key="tag"
-                    class="label-chip label-chip-subproject"
-                  >
-                    {{ tag }}
-                  </span>
-                </span>
-              </span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Ref type toggle + Branch/Tag select -->
-      <div class="form-group">
-        <label>引用类型</label>
-        <div class="ref-type-toggle">
-          <label class="ref-radio">
-            <input type="radio" name="refType" value="branch" v-model="refType" />
-            分支
-          </label>
-          <label class="ref-radio">
-            <input type="radio" name="refType" value="tag" v-model="refType" />
-            标签
-          </label>
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label for="ref-select">{{ refType === 'branch' ? '分支' : '标签' }}</label>
-        <select
-          id="ref-select"
-          v-model="selectedRef"
-          :disabled="!selectedProject || loadingRefs"
-        >
-          <option value="" disabled>{{ refType === 'branch' ? '请选择分支' : '请选择标签' }}</option>
-          <option
-            v-for="item in refList"
-            :key="item.name"
-            :value="item.name"
           >
-            {{ item.name }}
-          </option>
-        </select>
-        <span v-if="loadingRefs" class="loading-hint">加载中…</span>
-        <div v-if="selectedRefInfo" class="last-commit-panel">
-          <div class="last-commit-heading">最后 commit</div>
-          <div class="last-commit-message">
-            {{ selectedRefInfo.commit_message || '暂无提交内容' }}
-          </div>
-          <div class="last-commit-meta">
-            <span>{{ formattedSelectedCommitTime }}</span>
-            <span v-if="selectedRefInfo.commit_id" class="commit-sha">
-              {{ shortCommitId(selectedRefInfo.commit_id) }}
+            <span v-if="selectedProject" class="selected-project-value">
+              <strong>{{ selectedUnitName }}</strong>
+              <span
+                class="selected-unit-chip"
+                :class="{ component: Boolean(selectedComponentInfo) }"
+              >
+                {{ selectedUnitLabel }}
+              </span>
             </span>
+            <span v-else class="cascader-placeholder">
+              {{ loadingProjects ? '加载项目中...' : '请选择项目' }}
+            </span>
+            <span class="chevron">›</span>
+          </button>
+
+          <div v-if="isProjectCascaderOpen" class="cascader-panel">
+            <div class="cascader-column">
+              <button
+                v-for="project in projects"
+                :key="project.full_name"
+                type="button"
+                :class="['cascader-option', { active: activeProject?.full_name === project.full_name }]"
+                @click="selectProjectLevel(project)"
+              >
+                <span>
+                  <strong>{{ project.name }}</strong>
+                  <small>{{ project.label }}</small>
+                </span>
+                <span v-if="project.mode === 'monorepo'">›</span>
+                <span v-else class="leaf-mark">选择</span>
+              </button>
+            </div>
+            <div v-if="activeProject?.mode === 'monorepo'" class="cascader-column component-column">
+              <div v-if="activeProject.components.length === 0" class="empty-option">暂无可部署组件</div>
+              <button
+                v-for="component in activeProject.components"
+                :key="component.key"
+                type="button"
+                :class="['cascader-option', { active: selectedComponent === component.key && selectedProject?.full_name === activeProject?.full_name }]"
+                @click="selectComponent(activeProject, component)"
+              >
+                <span>
+                  <strong>{{ component.key }}</strong>
+                  <small>{{ component.label }}</small>
+                </span>
+                <span class="leaf-mark">选择</span>
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Environment select -->
-      <div class="form-group">
-        <label id="env-label">环境</label>
-        <div class="env-options" role="radiogroup" aria-labelledby="env-label">
+      <section class="form-step" :class="{ muted: !selectedProject }">
+        <div class="step-title"><span>2</span><strong>分支或标签</strong></div>
+        <div class="ref-type-toggle">
+          <label><input v-model="refType" type="radio" value="branch" :disabled="!selectedProject" /> 分支</label>
+          <label><input v-model="refType" type="radio" value="tag" :disabled="!selectedProject" /> 标签</label>
+        </div>
+        <label class="field-label" for="ref-select">{{ refType === 'branch' ? '分支' : '标签' }}</label>
+        <select id="ref-select" v-model="selectedRef" :disabled="!selectedProject || loadingRefs">
+          <option value="" disabled>{{ loadingRefs ? '加载中...' : `请选择${refType === 'branch' ? '分支' : '标签'}` }}</option>
+          <option v-for="item in refList" :key="item.name" :value="item.name">{{ item.name }}</option>
+        </select>
+        <div v-if="selectedRefInfo" class="commit-card">
+          <strong>{{ selectedRefInfo.commit_message || '暂无提交说明' }}</strong>
+          <span>{{ shortCommitId(selectedRefInfo.commit_id) }} · {{ formattedSelectedCommitTime }}</span>
+        </div>
+      </section>
+
+      <section class="form-step" :class="{ muted: !selectedRef }">
+        <div class="step-title"><span>3</span><strong>环境</strong></div>
+        <div class="choice-grid" role="radiogroup" aria-label="环境">
           <label
             v-for="env in environments"
             :key="env.key"
-            class="env-radio"
-            :class="{ 'env-disabled': env.disabled }"
+            :class="['choice-card', { selected: selectedEnvironment === env.key, disabled: env.disabled }]"
           >
             <input
+              v-model="selectedEnvironment"
               type="radio"
               name="environment"
               :value="env.key"
-              v-model="selectedEnvironment"
-              :disabled="env.disabled"
+              :disabled="!selectedRef || env.disabled"
+              @change="selectEnvironment(env)"
             />
-            {{ env.label }}
-            <span v-if="env.disabled" class="disabled-tag">未开放</span>
+            <strong>{{ env.label }}</strong>
+            <small v-if="env.disabled">当前项目未配置部署规则</small>
+            <small v-else>{{ env.targets.length }} 个可用部署目标</small>
           </label>
         </div>
-      </div>
+      </section>
 
-      <!-- Deploy button -->
-      <div class="form-group">
-        <button
-          type="submit"
-          class="deploy-btn"
-          :disabled="!canDeploy || deploying"
-          :aria-disabled="!canDeploy || deploying"
-          :title="deployButtonHint"
-        >
-          {{ deploying ? '部署中…' : '部署' }}
+      <section v-if="selectedEnvironment" class="form-step">
+        <div class="step-title"><span>4</span><strong>部署服务器</strong></div>
+        <div v-if="selectedEnvironmentInfo?.targets.length === 1" class="auto-target">
+          <span class="auto-badge">已自动选择</span>
+          <strong>{{ selectedEnvironmentInfo.targets[0].label }}</strong>
+          <small>{{ formatServerAddress(selectedEnvironmentInfo.targets[0]) }}</small>
+        </div>
+        <div v-else class="choice-grid target-grid" role="radiogroup" aria-label="部署服务器">
+          <label
+            v-for="target in selectedEnvironmentInfo?.targets ?? []"
+            :key="target.key"
+            :class="['choice-card target-card', { selected: selectedTarget === target.key }]"
+          >
+            <input v-model="selectedTarget" type="radio" name="target" :value="target.key" />
+            <strong>{{ target.label }}</strong>
+            <small>{{ formatServerAddress(target) }}</small>
+          </label>
+        </div>
+      </section>
+
+      <div class="deploy-actions">
+        <button class="deploy-btn" type="submit" :disabled="!canDeploy || deploying" :title="deployButtonHint">
+          {{ deploying ? '部署中…' : '确认部署' }}
         </button>
-        <span v-if="!canDeploy" class="hint">请先选择项目、{{ refType === 'branch' ? '分支' : '标签' }}和环境</span>
+        <span>{{ deployButtonHint }}</span>
       </div>
     </form>
 
-    <!-- Password modal -->
-    <div v-if="showPasswordModal" class="modal-overlay" @click.self="cancelPassword">
-      <div class="modal-content">
-        <h3>部署确认</h3>
-        <p class="modal-info">请输入「{{ passwordEnvLabel }}」部署密码</p>
-        <div class="password-input-wrapper">
-          <input
-            ref="passwordInputRef"
-            :type="showPassword ? 'text' : 'password'"
-            v-model="passwordInput"
-            placeholder="请输入部署密码"
-            class="password-input"
-            @keyup.enter="confirmPassword"
-          />
-          <button type="button" class="toggle-password-btn" @click="showPassword = !showPassword" :aria-label="showPassword ? '隐藏密码' : '显示密码'">
-            {{ showPassword ? '🙈' : '👁' }}
-          </button>
-        </div>
+    <div v-if="showPasswordModal" class="modal-backdrop">
+      <form class="password-modal" @submit.prevent="confirmPassword">
+        <h2>{{ passwordEnvLabel }}部署验证</h2>
+        <p>请输入部署密码后继续。</p>
+        <label>部署密码<input ref="passwordInputRef" v-model="passwordInput" :type="showPassword ? 'text' : 'password'" autocomplete="off" /></label>
+        <label class="show-password"><input v-model="showPassword" type="checkbox" /> 显示密码</label>
         <div class="modal-actions">
-          <button class="modal-btn modal-cancel" @click="cancelPassword">取消</button>
-          <button class="modal-btn modal-confirm" @click="confirmPassword">确认部署</button>
+          <button type="button" class="secondary-btn" @click="cancelPassword">取消</button>
+          <button class="deploy-btn" type="submit">确认</button>
         </div>
-      </div>
-    </div>
-
-    <!-- Environment quick links -->
-    <div v-if="environments.length > 0" class="env-links-section">
-      <h3>环境访问</h3>
-      <div class="env-links-grid">
-        <div v-for="env in environments" :key="env.key" class="env-link-card">
-          <span class="env-link-label">{{ env.label }}</span>
-          <div class="env-link-buttons">
-            <a
-              v-if="env.user_url"
-              :href="env.user_url"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="env-link-btn user-btn"
-            >用户端</a>
-            <a
-              v-if="env.admin_url"
-              :href="env.admin_url"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="env-link-btn admin-btn"
-            >管理端</a>
-            <template v-if="env.extra && env.extra.length > 0">
-              <span class="env-link-divider">|</span>
-              <a
-                v-for="link in env.extra"
-                :key="link.url"
-                :href="link.url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="env-link-btn extra-btn"
-              >{{ link.label }}</a>
-            </template>
-          </div>
-        </div>
-      </div>
+      </form>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import {
-  fetchProjects,
-  fetchBranches,
-  fetchTags,
-  fetchEnvironments,
-  triggerDeploy,
-  type Project,
-  type Branch,
-  type Tag,
-  type Environment,
-  type DeployResponse,
-} from '../api/index'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DeployStatus from '../components/DeployStatus.vue'
+import {
+  fetchBranches,
+  fetchEnvironments,
+  fetchProjects,
+  fetchTags,
+  triggerDeploy,
+  type Branch,
+  type DeployResponse,
+  type Environment,
+  type DeploymentTarget,
+  type Project,
+  type ProjectComponent,
+  type Tag,
+} from '../api/index'
 
-const emit = defineEmits<{
-  deployed: []
-}>()
-
-// --- Reactive state ---
+const emit = defineEmits<{ deployed: [] }>()
 const projects = ref<Project[]>([])
 const branches = ref<Branch[]>([])
 const tags = ref<Tag[]>([])
 const environments = ref<Environment[]>([])
-
-const selectedProjectKey = ref('')
-const selectedSubProject = ref('')
-const activeProjectKey = ref('')
+const selectedProject = ref<Project | null>(null)
+const activeProject = ref<Project | null>(null)
+const selectedComponent = ref('')
 const refType = ref<'branch' | 'tag'>('branch')
 const selectedRef = ref('')
-const selectedEnvironment = ref('dev')
-
-const errorMessage = ref('')
-const deployResult = ref<DeployResponse | null>(null)
-
+const selectedEnvironment = ref('')
+const selectedTarget = ref('')
 const loadingProjects = ref(false)
 const loadingRefs = ref(false)
 const deploying = ref(false)
-
+const errorMessage = ref('')
+const deployResult = ref<DeployResponse | null>(null)
 const showDeployStatus = ref(false)
 const isProjectCascaderOpen = ref(false)
 const projectCascaderRef = ref<HTMLElement | null>(null)
-
-// Password modal state
 const showPasswordModal = ref(false)
 const passwordInput = ref('')
 const showPassword = ref(false)
 const passwordEnvLabel = ref('')
 const passwordInputRef = ref<HTMLInputElement | null>(null)
 
-// --- Computed ---
-interface ProjectGroup {
-  key: string
-  name: string
-  label: string
-  projects: Project[]
-}
-
-const projectGroups = computed<ProjectGroup[]>(() => {
-  const groups = new Map<string, ProjectGroup>()
-  for (const project of projects.value) {
-    const key = projectKey(project)
-    const existing = groups.get(key)
-    if (existing) {
-      existing.projects.push(project)
-    } else {
-      groups.set(key, {
-        key,
-        name: project.name,
-        label: projectLabel(project),
-        projects: [project],
-      })
-    }
-  }
-
-  return [...groups.values()]
-    .map(group => ({
-      ...group,
-      projects: sortSubProjects(group.projects),
-    }))
-    .sort((a, b) => compareText(a.name, b.name) || compareText(a.key, b.key))
-})
-
-const selectedProjectGroup = computed(() => {
-  return projectGroups.value.find(group => group.key === selectedProjectKey.value) ?? null
-})
-
-const selectedProjectSubProjects = computed(() => {
-  return selectedProjectGroup.value?.projects ?? []
-})
-
-const activeProjectGroup = computed(() => {
-  return projectGroups.value.find(group => group.key === activeProjectKey.value) ?? selectedProjectGroup.value ?? projectGroups.value[0] ?? null
-})
-
-const activeProjectSubProjects = computed(() => {
-  return activeProjectGroup.value?.projects ?? []
-})
-
-const selectedProject = computed(() => {
-  return selectedProjectSubProjects.value.find(project => project.sub_project === selectedSubProject.value) ?? null
-})
-
-const selectedProjectPath = computed(() => {
-  if (!selectedProject.value) return ''
-  return `${selectedProject.value.name} / ${selectedProject.value.sub_project}`
-})
-
-const refList = computed(() => {
-  return refType.value === 'branch' ? branches.value : tags.value
-})
-
-const selectedRefInfo = computed(() => {
-  return refList.value.find(item => item.name === selectedRef.value) ?? null
-})
-
+const refList = computed(() => refType.value === 'branch' ? branches.value : tags.value)
+const selectedRefInfo = computed(() => refList.value.find(item => item.name === selectedRef.value) ?? null)
 const formattedSelectedCommitTime = computed(() => {
   if (!selectedRefInfo.value?.commit_time) return '暂无提交时间'
-  return formatCommitTime(selectedRefInfo.value.commit_time)
+  return new Date(selectedRefInfo.value.commit_time).toLocaleString('zh-CN')
 })
-
-const canDeploy = computed(() => {
-  return selectedProject.value !== null && selectedRef.value !== '' && selectedEnvironment.value !== ''
+const selectedComponentInfo = computed(() => {
+  if (!selectedProject.value || !selectedComponent.value) return null
+  return selectedProject.value.components.find(item => item.key === selectedComponent.value) ?? null
 })
-
+const selectedUnitName = computed(() => {
+  if (!selectedProject.value) return ''
+  if (!selectedComponentInfo.value) return selectedProject.value.name
+  return `${selectedProject.value.name} / ${selectedComponentInfo.value.key}`
+})
+const selectedUnitLabel = computed(() => {
+  return selectedComponentInfo.value?.label ?? selectedProject.value?.label ?? ''
+})
+const selectedEnvironmentInfo = computed(() => environments.value.find(item => item.key === selectedEnvironment.value) ?? null)
+const selectedTargetInfo = computed(() => selectedEnvironmentInfo.value?.targets.find(item => item.key === selectedTarget.value) ?? null)
+const canDeploy = computed(() => Boolean(selectedProject.value && selectedRef.value && selectedEnvironment.value && selectedTarget.value))
 const deployButtonHint = computed(() => {
-  if (canDeploy.value) return '点击触发部署'
+  if (canDeploy.value) return '配置已完整，可以触发部署'
   const missing: string[] = []
   if (!selectedProject.value) missing.push('项目')
   if (!selectedRef.value) missing.push(refType.value === 'branch' ? '分支' : '标签')
   if (!selectedEnvironment.value) missing.push('环境')
+  if (selectedEnvironment.value && !selectedTarget.value) missing.push('部署服务器')
   return `请先选择${missing.join('、')}`
 })
 
-function compareText(a: string, b: string): number {
-  return a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' })
+function compareText(left: string, right: string) {
+  return left.localeCompare(right, 'zh-CN')
 }
 
-function sortProjects(list: Project[]): Project[] {
-  return [...list].sort((a, b) => {
-    return (
-      compareText(a.name, b.name) ||
-      compareText(a.sub_project, b.sub_project) ||
-      compareText(a.owner, b.owner) ||
-      compareText(a.full_name, b.full_name) ||
-      compareText(projectLabel(a), projectLabel(b)) ||
-      compareText(subProjectLabel(a), subProjectLabel(b))
-    )
-  })
+function shortCommitId(value: string) {
+  return value.length > 8 ? value.slice(0, 8) : value
 }
 
-function sortSubProjects(list: Project[]): Project[] {
-  return [...list].sort((a, b) => (
-    compareText(a.sub_project, b.sub_project) ||
-    compareText(subProjectLabel(a), subProjectLabel(b))
-  ))
-}
-
-function projectKey(project: Project): string {
-  return `${project.owner}/${project.name}`
-}
-
-function projectLabel(project: Project): string {
-  return project.project_label || project.name
-}
-
-function subProjectLabel(project: Project): string {
-  return project.sub_project_label || project.sub_project
-}
-
-function splitLabelTags(label: string): string[] {
-  return label
-    .split('/')
-    .map(item => item.trim())
-    .filter(Boolean)
-}
-
-function openProjectCascader() {
-  if (loadingProjects.value) return
-  activeProjectKey.value = ''
-  isProjectCascaderOpen.value = true
-}
-
-function closeProjectCascader() {
-  isProjectCascaderOpen.value = false
+function formatServerAddress(target: DeploymentTarget | null | undefined) {
+  if (!target) return ''
+  const host = target.server_host || target.server
+  return target.server_port ? `${host}:${target.server_port}` : host
 }
 
 function toggleProjectCascader() {
-  if (isProjectCascaderOpen.value) {
-    closeProjectCascader()
-  } else {
-    openProjectCascader()
+  isProjectCascaderOpen.value = !isProjectCascaderOpen.value
+  if (isProjectCascaderOpen.value && !activeProject.value) {
+    activeProject.value = selectedProject.value ?? projects.value[0] ?? null
   }
-}
-
-async function selectSubProject(project: Project) {
-  selectedProjectKey.value = projectKey(project)
-  selectedSubProject.value = project.sub_project
-  selectedRef.value = ''
-  branches.value = []
-  tags.value = []
-  deployResult.value = null
-  closeProjectCascader()
-
-  await Promise.all([loadRefs(), loadEnvironments()])
 }
 
 function handleDocumentClick(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Node)) return
-  if (!projectCascaderRef.value?.contains(target)) {
-    closeProjectCascader()
-  }
+  if (!(event.target instanceof Node)) return
+  if (!projectCascaderRef.value?.contains(event.target)) isProjectCascaderOpen.value = false
 }
 
-function sortRefs<T extends { name: string }>(list: T[]): T[] {
-  return [...list].sort((a, b) => compareText(a.name, b.name))
+async function selectProjectLevel(project: Project) {
+  activeProject.value = project
+  if (project.mode === 'single') await commitUnitSelection(project, '')
 }
 
-function shortCommitId(commitID: string): string {
-  return commitID.length > 8 ? commitID.slice(0, 8) : commitID
+async function selectComponent(project: Project, component: ProjectComponent) {
+  await commitUnitSelection(project, component.key)
 }
 
-function formatCommitTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).format(date)
+async function commitUnitSelection(project: Project, component: string) {
+  selectedProject.value = project
+  selectedComponent.value = component
+  selectedRef.value = ''
+  selectedEnvironment.value = ''
+  selectedTarget.value = ''
+  branches.value = []
+  tags.value = []
+  deployResult.value = null
+  isProjectCascaderOpen.value = false
+  await Promise.all([loadRefs(), loadDeploymentOptions()])
 }
-
-// --- Load on mount ---
-onMounted(async () => {
-  await Promise.all([loadProjects(), loadEnvironments()])
-  document.addEventListener('click', handleDocumentClick)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('click', handleDocumentClick)
-})
 
 async function loadProjects() {
   loadingProjects.value = true
   try {
-    projects.value = sortProjects(await fetchProjects())
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : '未知错误'
-    errorMessage.value = `获取项目列表失败：${message}`
+    projects.value = (await fetchProjects()).sort((a, b) => compareText(a.label, b.label) || compareText(a.name, b.name))
+  } catch (error) {
+    errorMessage.value = `获取项目列表失败：${error instanceof Error ? error.message : '未知错误'}`
   } finally {
     loadingProjects.value = false
   }
 }
 
-async function loadEnvironments() {
-  try {
-    const proj = selectedProject.value
-    environments.value = await fetchEnvironments(
-      proj?.name,
-      proj?.sub_project,
-    )
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : '未知错误'
-    errorMessage.value = `获取环境列表失败：${message}`
-  }
-}
-
-// --- Watch refType to reload list ---
-watch(refType, async () => {
-  selectedRef.value = ''
-  if (!selectedProject.value) return
-  await loadRefs()
-})
-
 async function loadRefs() {
-  const proj = selectedProject.value
-  if (!proj) return
-
+  if (!selectedProject.value) return
   loadingRefs.value = true
   try {
     if (refType.value === 'branch') {
-      branches.value = sortRefs(await fetchBranches(proj.owner, proj.name))
+      branches.value = (await fetchBranches(selectedProject.value.owner, selectedProject.value.name)).sort((a, b) => compareText(a.name, b.name))
     } else {
-      tags.value = sortRefs(await fetchTags(proj.owner, proj.name))
+      tags.value = (await fetchTags(selectedProject.value.owner, selectedProject.value.name)).sort((a, b) => compareText(a.name, b.name))
     }
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : '未知错误'
-    errorMessage.value = `获取${refType.value === 'branch' ? '分支' : '标签'}列表失败：${message}`
+  } catch (error) {
+    errorMessage.value = `获取${refType.value === 'branch' ? '分支' : '标签'}失败：${error instanceof Error ? error.message : '未知错误'}`
   } finally {
     loadingRefs.value = false
   }
 }
 
-// --- Deploy handler ---
+async function loadDeploymentOptions() {
+  if (!selectedProject.value) return
+  try {
+    environments.value = await fetchEnvironments(selectedProject.value.name, selectedComponent.value || undefined)
+  } catch (error) {
+    errorMessage.value = `获取部署环境失败：${error instanceof Error ? error.message : '未知错误'}`
+  }
+}
+
+function selectEnvironment(environment: Environment) {
+  selectedTarget.value = environment.targets.length === 1 ? environment.targets[0].key : ''
+}
+
+watch(refType, async () => {
+  selectedRef.value = ''
+  if (selectedProject.value) await loadRefs()
+})
+
 async function handleDeploy() {
-  if (!canDeploy.value || deploying.value || !selectedProject.value) return
-
-  const proj = selectedProject.value
-  const selectedEnv = environments.value.find(e => e.key === selectedEnvironment.value)
-
-  if (selectedEnv?.need_password) {
-    // Show password modal
-    passwordEnvLabel.value = selectedEnv.label
+  if (!canDeploy.value || !selectedProject.value || !selectedEnvironmentInfo.value || !selectedTargetInfo.value) return
+  if (selectedEnvironmentInfo.value.need_password) {
+    passwordEnvLabel.value = selectedEnvironmentInfo.value.label
     passwordInput.value = ''
     showPassword.value = false
     showPasswordModal.value = true
     await nextTick()
     passwordInputRef.value?.focus()
-  } else {
-    // Show normal confirm dialog
-    const envLabel = selectedEnv?.label ?? selectedEnvironment.value
-    const refLabel = refType.value === 'branch' ? '分支' : '标签'
-    const confirmMsg = `确认部署？\n\n项目：${projectLabel(proj)}\n子项目：${subProjectLabel(proj)}\n${refLabel}：${selectedRef.value}\n环境：${envLabel}`
-    if (!window.confirm(confirmMsg)) return
-    await executeDeploy()
+    return
   }
+  if (!window.confirm(confirmMessage())) return
+  await executeDeploy()
+}
+
+function confirmMessage() {
+  const component = selectedComponent.value ? `\n组件：${selectedComponent.value}` : ''
+  return `确认部署？\n\n项目：${selectedProject.value?.label}${component}\n${refType.value === 'branch' ? '分支' : '标签'}：${selectedRef.value}\n环境：${selectedEnvironmentInfo.value?.label}\n部署目标：${selectedTargetInfo.value?.label}\n服务器：${formatServerAddress(selectedTargetInfo.value)}`
 }
 
 function cancelPassword() {
@@ -578,36 +362,33 @@ async function confirmPassword() {
     errorMessage.value = '部署密码不能为空'
     return
   }
+  if (!window.confirm(confirmMessage())) return
   showPasswordModal.value = false
   await executeDeploy(passwordInput.value.trim())
   passwordInput.value = ''
 }
 
 async function executeDeploy(deployPassword?: string) {
-  const proj = selectedProject.value
-  if (!proj) return
-
+  if (!selectedProject.value) return
   deploying.value = true
   errorMessage.value = ''
   deployResult.value = null
-  showDeployStatus.value = false
-
   try {
     deployResult.value = await triggerDeploy({
-      project_owner: proj.owner,
-      project_name: proj.name,
+      project_owner: selectedProject.value.owner,
+      project_name: selectedProject.value.name,
       branch: selectedRef.value,
       commit_message: selectedRefInfo.value?.commit_message,
       commit_time: selectedRefInfo.value?.commit_time,
       environment: selectedEnvironment.value,
-      sub_project: proj.sub_project,
+      component: selectedComponent.value || undefined,
+      target: selectedTarget.value,
       deploy_password: deployPassword,
     })
     showDeployStatus.value = true
     emit('deployed')
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : '未知错误'
-    errorMessage.value = `部署触发失败：${message}`
+  } catch (error) {
+    errorMessage.value = `部署触发失败：${error instanceof Error ? error.message : '未知错误'}`
   } finally {
     deploying.value = false
   }
@@ -616,90 +397,79 @@ async function executeDeploy(deployPassword?: string) {
 function onDeployComplete() {
   emit('deployed')
 }
+
+onMounted(async () => {
+  document.addEventListener('click', handleDocumentClick)
+  await loadProjects()
+})
+
+onUnmounted(() => document.removeEventListener('click', handleDocumentClick))
 </script>
 
 <style scoped>
-.deploy-page { margin: 0; padding: 24px 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a1a; }
-h1 { font-size: 1.5rem; margin: 0 0 4px; }
-.subtitle { color: #666; margin: 0 0 24px; font-size: 0.95rem; }
-.error-alert { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; font-size: 0.9rem; }
-.error-close { background: none; border: none; color: #b91c1c; font-size: 1.2rem; cursor: pointer; padding: 0 0 0 12px; line-height: 1; }
-.success-alert { background: #f0fdf4; border: 1px solid #86efac; color: #166534; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }
-.deploy-form { display: flex; flex-direction: column; gap: 20px; }
-.form-group { display: flex; flex-direction: column; gap: 6px; }
-.form-group > label { font-weight: 600; font-size: 0.9rem; }
-.project-cascader { position: relative; max-width: 640px; }
-.cascader-trigger { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #111827; font-size: 0.95rem; text-align: left; cursor: pointer; }
-.cascader-trigger:hover:not(:disabled), .cascader-trigger-open { border-color: #2563eb; box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.15); }
-.cascader-trigger:disabled { background: #f3f4f6; color: #9ca3af; cursor: not-allowed; }
-.cascader-placeholder { color: #9ca3af; }
-.cascader-arrow { color: #9ca3af; font-size: 1.2rem; transform: rotate(90deg); }
-.cascader-panel { position: absolute; top: calc(100% + 8px); left: 0; z-index: 20; display: grid; grid-template-columns: minmax(220px, 1fr); width: min(360px, calc(100vw - 32px)); max-width: 100%; border: 1px solid #e5e7eb; border-radius: 4px; background: #fff; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14); overflow: hidden; }
-.cascader-panel-expanded { grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr); width: min(720px, calc(100vw - 32px)); }
-.cascader-column { max-height: 260px; overflow-y: auto; padding: 6px 0; }
-.cascader-column + .cascader-column { border-left: 1px solid #e5e7eb; }
-.cascader-option { width: 100%; min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px 7px 14px; border: 0; background: transparent; color: #4b5563; font-size: 0.9rem; text-align: left; cursor: pointer; }
-.cascader-option:hover, .cascader-option-active { background: #f3f4f6; color: #1d4ed8; font-weight: 600; }
-.cascader-option-content { min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.cascader-option-name { overflow-wrap: anywhere; }
-.cascader-option-tags { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-.cascader-next { color: #9ca3af; font-size: 1.1rem; line-height: 1; }
-.label-chip { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid; border-radius: 3px; padding: 1px 6px; font-size: 0.72rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
-.label-chip-project { color: #1e40af; border-color: #bfdbfe; background: #eff6ff; }
-.label-chip-subproject { color: #047857; border-color: #bbf7d0; background: #f0fdf4; }
-select { padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 0.95rem; background: #fff; color: #1a1a1a; appearance: auto; }
-select:disabled { background: #f3f4f6; color: #9ca3af; cursor: not-allowed; }
-.env-options { display: flex; gap: 16px; flex-wrap: wrap; }
-.ref-type-toggle { display: flex; gap: 16px; }
-.ref-radio { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; cursor: pointer; font-weight: normal; }
-.ref-radio input[type='radio'] { margin: 0; }
-.env-radio { display: flex; align-items: center; gap: 6px; font-size: 0.95rem; cursor: pointer; font-weight: normal; }
-.env-radio input[type='radio'] { margin: 0; }
-.env-disabled { opacity: 0.5; cursor: not-allowed; }
-.env-disabled input[type='radio'] { cursor: not-allowed; }
-.disabled-tag { font-size: 0.75rem; color: #9ca3af; margin-left: 2px; }
-.deploy-btn { padding: 10px 24px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.15s; align-self: flex-start; }
-.deploy-btn:hover:not(:disabled) { background: #1d4ed8; }
-.deploy-btn:disabled { background: #93c5fd; cursor: not-allowed; }
-.hint { color: #9ca3af; font-size: 0.85rem; }
-.loading-hint { color: #6b7280; font-size: 0.85rem; }
-.last-commit-panel { border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb; padding: 10px 12px; margin-top: 4px; }
-.last-commit-heading { color: #4b5563; font-size: 0.78rem; font-weight: 600; margin-bottom: 4px; }
-.last-commit-message { color: #111827; font-size: 0.92rem; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
-.last-commit-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: #6b7280; font-size: 0.8rem; margin-top: 6px; }
-.commit-sha { font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; background: #eef2ff; color: #3730a3; border-radius: 4px; padding: 2px 6px; }
-.env-links-section { margin-top: 32px; padding-top: 24px; border-top: 1px solid #e5e7eb; }
-.env-links-section h3 { font-size: 1rem; margin: 0 0 12px; font-weight: 600; }
-.env-links-grid { display: flex; flex-direction: column; gap: 10px; }
-.env-link-card { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; }
-.env-link-label { font-size: 0.9rem; font-weight: 500; color: #374151; min-width: 72px; }
-.env-link-buttons { display: flex; gap: 8px; }
-.env-link-btn { padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 500; text-decoration: none; transition: background 0.15s; }
-.user-btn { background: #dbeafe; color: #1d4ed8; }
-.user-btn:hover { background: #bfdbfe; }
-.admin-btn { background: #fef3c7; color: #92400e; }
-.admin-btn:hover { background: #fde68a; }
-.env-link-divider { color: #d1d5db; font-size: 0.9rem; margin: 0 2px; }
-.extra-btn { background: #e0e7ff; color: #3730a3; }
-.extra-btn:hover { background: #c7d2fe; }
-
-/* Password modal */
-.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.modal-content { background: #fff; border-radius: 10px; padding: 28px 24px; width: 360px; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
-.modal-content h3 { margin: 0 0 8px; font-size: 1.1rem; }
-.modal-info { color: #666; font-size: 0.9rem; margin: 0 0 16px; }
-.password-input-wrapper { position: relative; margin-bottom: 20px; }
-.password-input { width: 100%; padding: 10px 40px 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 0.95rem; box-sizing: border-box; }
-.password-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
-.toggle-password-btn { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 1.1rem; padding: 4px; line-height: 1; }
-.modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
-.modal-btn { padding: 8px 20px; border-radius: 6px; font-size: 0.9rem; font-weight: 600; cursor: pointer; border: none; }
-.modal-cancel { background: #f3f4f6; color: #374151; }
-.modal-cancel:hover { background: #e5e7eb; }
-.modal-confirm { background: #2563eb; color: #fff; }
-.modal-confirm:hover { background: #1d4ed8; }
-@media (max-width: 720px) {
+.deploy-page { padding: 24px 16px; color: #172033; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.page-heading { margin-bottom: 24px; }
+.page-heading h1 { margin: 0; font-size: 1.55rem; }
+.page-heading p { margin: 6px 0 0; color: #64748b; }
+.alert { margin-bottom: 16px; padding: 11px 14px; border: 1px solid; border-radius: 8px; }
+.error-alert { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.success-alert { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+.deploy-form { display: grid; gap: 18px; max-width: 860px; }
+.form-step { padding: 18px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+.form-step.muted { opacity: .65; }
+.step-title { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+.step-title span { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; color: #fff; background: #2563eb; font-size: .8rem; }
+.project-cascader { position: relative; max-width: 720px; }
+.cascader-trigger { display: flex; width: 100%; min-height: 50px; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 13px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #334155; font-size: 1rem; cursor: pointer; }
+.cascader-trigger:disabled { cursor: wait; opacity: .6; }
+.selected-project-value { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 8px; text-align: left; }
+.selected-project-value strong { overflow: hidden; font-size: 1.05rem; font-weight: 650; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.selected-unit-chip { flex: 0 0 auto; padding: 2px 8px; border: 1px solid #bfdbfe; border-radius: 4px; background: #eff6ff; color: #1d4ed8; font-size: .9rem; font-weight: 600; line-height: 1.4; }
+.selected-unit-chip.component { border-color: #bbf7d0; background: #f0fdf4; color: #047857; }
+.cascader-placeholder { font-size: 1rem; }
+.chevron { flex: 0 0 auto; transform: rotate(90deg); font-size: 1.25rem; }
+.cascader-panel { position: absolute; z-index: 8; top: calc(100% + 6px); left: 0; display: grid; width: min(760px, calc(100vw - 64px)); grid-template-columns: minmax(240px, 1fr) minmax(280px, 1.2fr); overflow: hidden; border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; box-shadow: 0 14px 30px rgb(15 23 42 / 16%); }
+.cascader-column { display: flex; max-height: 340px; flex-direction: column; overflow: auto; padding: 8px; }
+.component-column { border-left: 1px solid #e2e8f0; background: #f8fafc; }
+.cascader-option { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
+.cascader-option:hover, .cascader-option.active { background: #eff6ff; color: #1d4ed8; }
+.cascader-option span:first-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.cascader-option strong { font-size: .96rem; line-height: 1.4; }
+.cascader-option small { overflow: hidden; color: #64748b; font-size: .84rem; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.leaf-mark { color: #2563eb; font-size: .84rem; }
+.empty-option { padding: 20px; color: #94a3b8; text-align: center; }
+.ref-type-toggle { display: flex; gap: 18px; margin-bottom: 12px; }
+.field-label { display: block; margin-bottom: 6px; color: #475569; font-size: .88rem; font-weight: 600; }
+select, .password-modal input[type="password"], .password-modal input[type="text"] { box-sizing: border-box; width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; }
+#ref-select { min-height: 50px; font-size: 1rem; font-weight: 500; }
+#ref-select option { font-size: 1rem; }
+.commit-card { display: flex; margin-top: 10px; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 7px; background: #f8fafc; color: #334155; }
+.commit-card span { color: #64748b; font-size: .82rem; }
+.choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.choice-card { display: grid; grid-template-columns: auto 1fr; column-gap: 9px; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; cursor: pointer; }
+.choice-card input { grid-row: 1 / span 2; align-self: center; }
+.choice-card strong, .choice-card small { grid-column: 2; }
+.choice-card small { margin-top: 3px; color: #64748b; }
+.choice-card.selected { border-color: #2563eb; background: #eff6ff; box-shadow: 0 0 0 1px #2563eb; }
+.choice-card.disabled { cursor: not-allowed; opacity: .55; background: #f8fafc; }
+.target-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.auto-target { display: flex; flex-direction: column; gap: 4px; padding: 14px; border: 1px solid #86efac; border-radius: 8px; background: #f0fdf4; }
+.auto-target small { color: #64748b; }
+.auto-badge { align-self: flex-start; padding: 2px 7px; border-radius: 10px; color: #166534; background: #dcfce7; font-size: .75rem; }
+.deploy-actions { display: flex; align-items: center; gap: 12px; color: #64748b; font-size: .88rem; }
+.deploy-btn, .secondary-btn { padding: 10px 18px; border-radius: 7px; font-weight: 600; cursor: pointer; }
+.deploy-btn { border: 1px solid #2563eb; color: #fff; background: #2563eb; }
+.deploy-btn:disabled { cursor: not-allowed; opacity: .55; }
+.secondary-btn { border: 1px solid #cbd5e1; color: #334155; background: #fff; }
+.modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 16px; background: rgb(15 23 42 / 50%); }
+.password-modal { display: flex; width: min(100%, 420px); flex-direction: column; gap: 12px; padding: 22px; border-radius: 10px; background: #fff; }
+.password-modal h2, .password-modal p { margin: 0; }
+.password-modal label:not(.show-password) { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.show-password { display: flex; align-items: center; gap: 7px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 680px) {
   .cascader-panel { grid-template-columns: 1fr; }
-  .cascader-column + .cascader-column { border-left: 0; border-top: 1px solid #e5e7eb; }
+  .component-column { border-top: 1px solid #e2e8f0; border-left: 0; }
+  .deploy-actions { align-items: flex-start; flex-direction: column; }
 }
 </style>

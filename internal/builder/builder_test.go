@@ -1,9 +1,11 @@
 package builder
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -156,7 +158,7 @@ func TestBuild_Success(t *testing.T) {
 	workDir := t.TempDir()
 
 	b := NewBuilder()
-	output, err := b.Build(workDir, "echo build-ok", "dev")
+	output, err := b.Build(context.Background(), workDir, "echo build-ok", "dev", nil)
 	require.NoError(t, err)
 	assert.Contains(t, output, "build-ok")
 }
@@ -165,7 +167,11 @@ func TestBuild_SetsEnvVariable(t *testing.T) {
 	workDir := t.TempDir()
 
 	b := NewBuilder()
-	output, err := b.Build(workDir, "echo $BUILD_ENV", "sit")
+	command := "echo $BUILD_ENV"
+	if runtime.GOOS == "windows" {
+		command = "echo %BUILD_ENV%"
+	}
+	output, err := b.Build(context.Background(), workDir, command, "sit", nil)
 	require.NoError(t, err)
 	assert.Contains(t, strings.TrimSpace(output), "sit")
 }
@@ -174,7 +180,7 @@ func TestBuild_Failure(t *testing.T) {
 	workDir := t.TempDir()
 
 	b := NewBuilder()
-	_, err := b.Build(workDir, "exit 1", "dev")
+	_, err := b.Build(context.Background(), workDir, "exit 1", "dev", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "build command failed")
 }
@@ -183,15 +189,45 @@ func TestBuild_CapturesStderr(t *testing.T) {
 	workDir := t.TempDir()
 
 	b := NewBuilder()
-	_, err := b.Build(workDir, "echo error-output >&2; exit 1", "prod")
+	command := "echo error-output >&2; exit 1"
+	if runtime.GOOS == "windows" {
+		command = "echo error-output 1>&2 && exit /b 1"
+	}
+	output, err := b.Build(context.Background(), workDir, command, "prod", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "error-output")
+	assert.Contains(t, output, "error-output")
 }
 
 func TestBuild_InvalidWorkDir(t *testing.T) {
 	b := NewBuilder()
-	_, err := b.Build("/nonexistent-dir-xyz", "echo hello", "dev")
+	_, err := b.Build(context.Background(), "/nonexistent-dir-xyz", "echo hello", "dev", nil)
 	require.Error(t, err)
+}
+
+func TestBuild_StreamsOutput(t *testing.T) {
+	workDir := t.TempDir()
+	lines := []string{}
+
+	b := NewBuilder()
+	output, err := b.Build(context.Background(), workDir, "echo first && echo second", "dev", func(line string) {
+		lines = append(lines, strings.TrimSpace(line))
+	})
+	require.NoError(t, err)
+	assert.Contains(t, output, "first")
+	assert.Contains(t, output, "second")
+	assert.Contains(t, lines, "first")
+	assert.Contains(t, lines, "second")
+}
+
+func TestBuild_ContextCanceled(t *testing.T) {
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	b := NewBuilder()
+	_, err := b.Build(ctx, workDir, "echo should-not-run", "prod", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "build command canceled")
 }
 
 func TestCleanWorkDir_RemovesGeneratedFiles(t *testing.T) {

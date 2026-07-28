@@ -15,12 +15,12 @@
         />
       </div>
       <div class="filter-group">
-        <label for="filter-sub-project">子项目关键字</label>
+        <label for="filter-sub-project">组件关键字</label>
         <input
           id="filter-sub-project"
           v-model="filter.sub_project_keyword"
           type="text"
-          placeholder="子项目名称或标签"
+          placeholder="组件名称或标签"
         />
       </div>
       <div class="filter-group">
@@ -78,10 +78,11 @@
         <thead>
           <tr>
             <th>项目名称</th>
-            <th>子项目</th>
+            <th>组件</th>
             <th>分支/Tag</th>
             <th>最后 commit</th>
             <th>环境</th>
+            <th>部署目标</th>
             <th>状态</th>
             <th>触发时间</th>
           </tr>
@@ -109,10 +110,10 @@
               </td>
               <td>
                 <div class="name-with-tags">
-                  <span class="entity-name">{{ record.sub_project || '-' }}</span>
-                  <span v-if="splitLabelTags(record.sub_project_label).length" class="entity-tags">
+                  <span class="entity-name">{{ record.component || record.sub_project || '—' }}</span>
+                  <span v-if="splitLabelTags(record.component_label || record.sub_project_label).length" class="entity-tags">
                     <span
-                      v-for="tag in splitLabelTags(record.sub_project_label)"
+                      v-for="tag in splitLabelTags(record.component_label || record.sub_project_label)"
                       :key="tag"
                       class="label-chip label-chip-subproject"
                     >
@@ -130,6 +131,12 @@
               </td>
               <td>{{ environmentLabel(record.environment) }}</td>
               <td>
+                <div class="target-info">
+                  <strong>{{ record.target_label || record.target || '—' }}</strong>
+                  <small v-if="record.server">{{ record.server }}</small>
+                </div>
+              </td>
+              <td>
                 <span :class="['status-badge', statusClass(record.status)]">
                   {{ statusLabel(record.status) }}
                 </span>
@@ -145,7 +152,7 @@
               <td>{{ formatTime(record.created_at) }}</td>
             </tr>
             <tr v-if="selectedRecordId === record.id" class="log-row">
-              <td colspan="7">
+              <td colspan="8">
                 <LogViewer :task-id="record.id" />
               </td>
             </tr>
@@ -667,6 +674,17 @@ h1 {
   color: #6b7280;
   font-size: 0.78rem;
   margin-top: 4px;
+}
+
+.target-info {
+  display: flex;
+  min-width: 120px;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.target-info small {
+  color: #6b7280;
 }
 
 .record-row {

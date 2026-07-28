@@ -115,21 +115,25 @@ func (h *Handler) handleSiteInfo(c *gin.Context) {
 	})
 }
 
-// ProjectItem represents a project entry in the flattened API response.
-// Each item is a deployable unit: "project_label - sub_project_label".
-type ProjectItem struct {
-	Owner           string `json:"owner"`
-	Name            string `json:"name"`
-	FullName        string `json:"full_name"`
-	Label           string `json:"label"`
-	ProjectLabel    string `json:"project_label"`
-	SubProject      string `json:"sub_project"`
-	SubProjectLabel string `json:"sub_project_label"`
-	CloneURL        string `json:"clone_url"`
+type ComponentItem struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Path  string `json:"path"`
 }
 
-// handleListProjects fetches all repositories from Gitea and returns a flattened list
-// where each entry is a "project - sub_project" deployable unit.
+// ProjectItem 表示一个代码仓库。single 项目自身可选，monorepo 通过 Components 选择真实应用。
+type ProjectItem struct {
+	Owner      string          `json:"owner"`
+	Name       string          `json:"name"`
+	FullName   string          `json:"full_name"`
+	Label      string          `json:"label"`
+	Mode       string          `json:"mode"`
+	Selectable bool            `json:"selectable"`
+	Components []ComponentItem `json:"components"`
+	CloneURL   string          `json:"clone_url"`
+}
+
+// handleListProjects 返回树形项目结构，避免把服务器部署变体伪装成子项目。
 func (h *Handler) handleListProjects(c *gin.Context) {
 	repos, err := h.giteaClient.ListRepos()
 	if err != nil {
@@ -141,7 +145,7 @@ func (h *Handler) handleListProjects(c *gin.Context) {
 	}
 
 	cfg := h.getLatestConfig()
-	items := make([]ProjectItem, 0)
+	items := make([]ProjectItem, 0, len(repos))
 
 	for _, repo := range repos {
 		projCfg, ok := cfg.Projects[repo.Name]
@@ -154,22 +158,30 @@ func (h *Handler) handleListProjects(c *gin.Context) {
 			projLabel = repo.Name
 		}
 
-		for spKey, spCfg := range projCfg.SubProjects {
-			spLabel := spCfg.Label
-			if spLabel == "" {
-				spLabel = spKey
+		components := make([]ComponentItem, 0, len(projCfg.Components))
+		for componentKey, component := range projCfg.Components {
+			label := component.Label
+			if label == "" {
+				label = componentKey
 			}
-			items = append(items, ProjectItem{
-				Owner:           repo.Owner,
-				Name:            repo.Name,
-				FullName:        repo.FullName,
-				Label:           projLabel + " - " + spLabel,
-				ProjectLabel:    projLabel,
-				SubProject:      spKey,
-				SubProjectLabel: spLabel,
-				CloneURL:        repo.CloneURL,
-			})
+			components = append(components, ComponentItem{Key: componentKey, Label: label, Path: component.Path})
 		}
+		sort.SliceStable(components, func(i, j int) bool {
+			if components[i].Label != components[j].Label {
+				return components[i].Label < components[j].Label
+			}
+			return components[i].Key < components[j].Key
+		})
+		items = append(items, ProjectItem{
+			Owner:      repo.Owner,
+			Name:       repo.Name,
+			FullName:   repo.FullName,
+			Label:      projLabel,
+			Mode:       projCfg.Mode,
+			Selectable: projCfg.Mode == "single",
+			Components: components,
+			CloneURL:   repo.CloneURL,
+		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].Label != items[j].Label {
@@ -181,10 +193,7 @@ func (h *Handler) handleListProjects(c *gin.Context) {
 		if items[i].Name != items[j].Name {
 			return items[i].Name < items[j].Name
 		}
-		if items[i].FullName != items[j].FullName {
-			return items[i].FullName < items[j].FullName
-		}
-		return items[i].SubProject < items[j].SubProject
+		return items[i].FullName < items[j].FullName
 	})
 
 	c.JSON(http.StatusOK, gin.H{
@@ -241,13 +250,23 @@ func (h *Handler) handleListTags(c *gin.Context) {
 
 // EnvironmentItem represents a single environment entry in the API response.
 type EnvironmentItem struct {
-	Key          string     `json:"key"`
-	Label        string     `json:"label"`
-	Disabled     bool       `json:"disabled"`
-	NeedPassword bool       `json:"need_password"`
-	UserURL      string     `json:"user_url"`
-	AdminURL     string     `json:"admin_url"`
-	Extra        []LinkItem `json:"extra"`
+	Key          string       `json:"key"`
+	Label        string       `json:"label"`
+	Disabled     bool         `json:"disabled"`
+	NeedPassword bool         `json:"need_password"`
+	Targets      []TargetItem `json:"targets"`
+	UserURL      string       `json:"user_url"`
+	AdminURL     string       `json:"admin_url"`
+	Extra        []LinkItem   `json:"extra"`
+}
+
+type TargetItem struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Server      string `json:"server"`
+	ServerLabel string `json:"server_label"`
+	ServerHost  string `json:"server_host"`
+	ServerPort  int    `json:"server_port"`
 }
 
 // LinkItem represents a custom link in the API response.
@@ -268,84 +287,86 @@ func toLinkItems(links []config.EnvLink) []LinkItem {
 	return items
 }
 
-// handleListEnvironments returns the list of available deployment environments.
-// Supports optional query params:
-//   - project: project name
-//   - sub_project: sub-project key
-//
-// When both are specified, environments not configured for that sub-project are marked disabled.
+// handleListEnvironments 返回环境及当前项目/组件的部署目标。
 func (h *Handler) handleListEnvironments(c *gin.Context) {
 	cfg := h.getLatestConfig()
 	projectName := c.Query("project")
-	subProjectName := c.Query("sub_project")
+	componentName := c.Query("component")
+	if componentName == "" {
+		componentName = c.Query("sub_project")
+	}
 
-	// Fixed order
 	order := []string{"dev", "sit", "prod"}
-	envs := make([]EnvironmentItem, 0, len(cfg.Environments))
+	for key := range cfg.Environments {
+		if key != "dev" && key != "sit" && key != "prod" {
+			order = append(order, key)
+		}
+	}
+	envs := make([]EnvironmentItem, 0, len(order))
+	var unitEnvironments map[string]config.UnitEnvConfig
+	if projectName != "" {
+		if resolved, _, _, err := cfg.GetUnitEnvironments(projectName, componentName); err == nil {
+			unitEnvironments = resolved
+		}
+	}
 
 	for _, key := range order {
 		envCfg, ok := cfg.Environments[key]
 		if !ok {
 			continue
 		}
-
 		item := EnvironmentItem{
 			Key:          key,
 			Label:        envCfg.Label,
 			Disabled:     envCfg.Disabled,
 			NeedPassword: envCfg.Password != "",
+			Targets:      []TargetItem{},
 			UserURL:      envCfg.Links.UserURL,
 			AdminURL:     envCfg.Links.AdminURL,
 			Extra:        toLinkItems(envCfg.Links.Extra),
 		}
-
-		// If project+sub_project specified, check if this env is configured
-		if projectName != "" && subProjectName != "" {
-			if projCfg, ok := cfg.Projects[projectName]; ok {
-				if subProjCfg, ok := projCfg.SubProjects[subProjectName]; ok {
-					if envOverride, ok := subProjCfg.EnvOverrides[key]; ok {
-						if envOverride.Disabled != nil {
-							item.Disabled = *envOverride.Disabled
-						}
-					} else {
-						item.Disabled = true
+		if projectName != "" {
+			unitEnv, configured := unitEnvironments[key]
+			if !configured {
+				item.Disabled = true
+			} else {
+				if unitEnv.Disabled != nil {
+					item.Disabled = item.Disabled || *unitEnv.Disabled
+				}
+				for targetKey, deployment := range unitEnv.Deployments {
+					if deployment.Disabled != nil && *deployment.Disabled {
+						continue
 					}
+					serverKey := deployment.Server
+					if serverKey == "" {
+						serverKey = targetKey
+					}
+					server := cfg.Servers[serverKey]
+					label := deployment.Label
+					if label == "" {
+						label = server.Label
+					}
+					item.Targets = append(item.Targets, TargetItem{
+						Key:         targetKey,
+						Label:       label,
+						Server:      serverKey,
+						ServerLabel: server.Label,
+						ServerHost:  server.Host,
+						ServerPort:  server.Port,
+					})
+				}
+				sort.SliceStable(item.Targets, func(i, j int) bool {
+					if item.Targets[i].Label != item.Targets[j].Label {
+						return item.Targets[i].Label < item.Targets[j].Label
+					}
+					return item.Targets[i].Key < item.Targets[j].Key
+				})
+				if len(item.Targets) == 0 {
+					item.Disabled = true
 				}
 			}
 		}
-
 		envs = append(envs, item)
-	}
-
-	// Append any extra environments not in the fixed order
-	for key, envCfg := range cfg.Environments {
-		if key != "dev" && key != "sit" && key != "prod" {
-			item := EnvironmentItem{
-				Key:          key,
-				Label:        envCfg.Label,
-				Disabled:     envCfg.Disabled,
-				NeedPassword: envCfg.Password != "",
-				UserURL:      envCfg.Links.UserURL,
-				AdminURL:     envCfg.Links.AdminURL,
-				Extra:        toLinkItems(envCfg.Links.Extra),
-			}
-
-			if projectName != "" && subProjectName != "" {
-				if projCfg, ok := cfg.Projects[projectName]; ok {
-					if subProjCfg, ok := projCfg.SubProjects[subProjectName]; ok {
-						if envOverride, ok := subProjCfg.EnvOverrides[key]; ok {
-							if envOverride.Disabled != nil {
-								item.Disabled = *envOverride.Disabled
-							}
-						} else {
-							item.Disabled = true
-						}
-					}
-				}
-			}
-
-			envs = append(envs, item)
-		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -366,10 +387,14 @@ func (h *Handler) handleDeploy(c *gin.Context) {
 	}
 
 	cfg := h.getLatestConfig()
-	if isDeploymentDisabled(cfg, req.ProjectName, req.SubProject, req.Environment) {
+	component := req.Component
+	if component == "" {
+		component = req.SubProject
+	}
+	if isDeploymentDisabled(cfg, req.ProjectName, component, req.Environment, req.Target) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    -1,
-			"message": "当前项目的该环境未开放部署",
+			"message": "当前项目、环境或部署目标未开放部署",
 		})
 		return
 	}
@@ -404,10 +429,8 @@ func (h *Handler) handleDeploy(c *gin.Context) {
 	})
 }
 
-// isDeploymentDisabled resolves the effective deployment permission for a
-// project sub-project environment. A sub-project override takes precedence over
-// the top-level environment setting; missing environment override is disabled.
-func isDeploymentDisabled(cfg *config.AppConfig, projectName, subProjectName, environment string) bool {
+// isDeploymentDisabled 统一检查环境、项目/组件环境及服务器部署目标三层权限。
+func isDeploymentDisabled(cfg *config.AppConfig, projectName, componentName, environment, target string) bool {
 	if cfg == nil {
 		return true
 	}
@@ -418,20 +441,32 @@ func isDeploymentDisabled(cfg *config.AppConfig, projectName, subProjectName, en
 	}
 	disabled := environmentCfg.Disabled
 
-	projectCfg, ok := cfg.Projects[projectName]
+	unitEnvironments, _, _, err := cfg.GetUnitEnvironments(projectName, componentName)
+	if err != nil {
+		return true
+	}
+	unitEnvironment, ok := unitEnvironments[environment]
 	if !ok {
 		return true
 	}
-	subProjectCfg, ok := projectCfg.SubProjects[subProjectName]
+	if unitEnvironment.Disabled != nil {
+		disabled = disabled || *unitEnvironment.Disabled
+	}
+	if target == "" {
+		enabledTargets := 0
+		for _, deployment := range unitEnvironment.Deployments {
+			if deployment.Disabled == nil || !*deployment.Disabled {
+				enabledTargets++
+			}
+		}
+		return disabled || enabledTargets != 1
+	}
+	deployment, ok := unitEnvironment.Deployments[target]
 	if !ok {
 		return true
 	}
-	override, ok := subProjectCfg.EnvOverrides[environment]
-	if !ok {
-		return true
-	}
-	if override.Disabled != nil {
-		disabled = *override.Disabled
+	if deployment.Disabled != nil {
+		disabled = disabled || *deployment.Disabled
 	}
 
 	return disabled
@@ -569,15 +604,29 @@ func (h *Handler) handleClearDeployHistory(c *gin.Context) {
 type EditableConfig struct {
 	Environments map[string]config.EnvConfig     `json:"environments"`
 	Projects     map[string]config.ProjectConfig `json:"projects"`
-	Servers      []string                        `json:"servers"`
+	Servers      []ServerSummary                 `json:"servers"`
+}
+
+type ServerSummary struct {
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	DeployPath string `json:"deploy_path"`
 }
 
 func editableConfig(cfg *config.AppConfig) EditableConfig {
-	servers := make([]string, 0, len(cfg.Servers))
-	for key := range cfg.Servers {
-		servers = append(servers, key)
+	servers := make([]ServerSummary, 0, len(cfg.Servers))
+	for key, server := range cfg.Servers {
+		servers = append(servers, ServerSummary{
+			Key:        key,
+			Label:      server.Label,
+			Host:       server.Host,
+			Port:       server.Port,
+			DeployPath: server.DeployPath,
+		})
 	}
-	sort.Strings(servers)
+	sort.SliceStable(servers, func(i, j int) bool { return servers[i].Key < servers[j].Key })
 	return EditableConfig{
 		Environments: cfg.Environments,
 		Projects:     cfg.Projects,
@@ -589,6 +638,7 @@ func editableConfig(cfg *config.AppConfig) EditableConfig {
 // The label and deploy password remain unchanged when access settings are saved.
 type EnvironmentAccessConfig struct {
 	Disabled bool            `json:"disabled"`
+	Servers  []string        `json:"servers"`
 	Links    config.EnvLinks `json:"links"`
 }
 
@@ -716,6 +766,7 @@ func (h *Handler) handleUpdateEnvironmentAccess(c *gin.Context) {
 		return
 	}
 	environment.Disabled = access.Disabled
+	environment.Servers = access.Servers
 	environment.Links = access.Links
 	updated.Environments[key] = environment
 
@@ -732,6 +783,7 @@ func (h *Handler) handleUpdateEnvironmentAccess(c *gin.Context) {
 		"code": 0,
 		"data": EnvironmentAccessConfig{
 			Disabled: h.cfg.Environments[key].Disabled,
+			Servers:  h.cfg.Environments[key].Servers,
 			Links:    h.cfg.Environments[key].Links,
 		},
 	})
@@ -802,6 +854,23 @@ func (h *Handler) handleUpdateConfig(c *gin.Context) {
 		return
 	}
 
+	// Secret fields are deliberately excluded from JSON. Preserve their current
+	// values so a full configuration update cannot silently erase credentials.
+	current := h.cfgManager.Get()
+	newCfg.AdminToken = current.AdminToken
+	for key, server := range newCfg.Servers {
+		if existing, ok := current.Servers[key]; ok {
+			server.Password = existing.Password
+			newCfg.Servers[key] = server
+		}
+	}
+	for key, environment := range newCfg.Environments {
+		if existing, ok := current.Environments[key]; ok {
+			environment.Password = existing.Password
+			newCfg.Environments[key] = environment
+		}
+	}
+
 	if err := h.cfgManager.Update(&newCfg); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    -1,
@@ -816,7 +885,7 @@ func (h *Handler) handleUpdateConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "配置已更新并保存",
-		"data":    h.cfgManager.Get(),
+		"data":    editableConfig(h.cfgManager.Get()),
 	})
 }
 

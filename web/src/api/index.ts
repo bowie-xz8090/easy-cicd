@@ -8,10 +8,16 @@ export interface Project {
   name: string
   full_name: string
   label: string
-  project_label: string
-  sub_project: string
-  sub_project_label: string
+  mode: 'single' | 'monorepo'
+  selectable: boolean
+  components: ProjectComponent[]
   clone_url: string
+}
+
+export interface ProjectComponent {
+  key: string
+  label: string
+  path: string
 }
 
 export interface Branch {
@@ -33,9 +39,19 @@ export interface Environment {
   label: string
   disabled: boolean
   need_password: boolean
+  targets: DeploymentTarget[]
   user_url: string
   admin_url: string
   extra: { label: string; url: string }[] | null
+}
+
+export interface DeploymentTarget {
+  key: string
+  label: string
+  server: string
+  server_label: string
+  server_host: string
+  server_port: number
 }
 
 export interface DeployRequest {
@@ -45,7 +61,8 @@ export interface DeployRequest {
   commit_message?: string
   commit_time?: string
   environment: string
-  sub_project: string
+  component?: string
+  target: string
   deploy_password?: string
 }
 
@@ -75,8 +92,13 @@ export interface DeployRecord {
   project_owner: string
   project_name: string
   project_label: string
+  component: string
+  component_label: string
   sub_project: string
   sub_project_label: string
+  target: string
+  target_label: string
+  server: string
   branch: string
   commit_message: string
   commit_time?: string
@@ -104,34 +126,55 @@ export interface RecordListResponse {
 export interface EditableConfig {
   environments: Record<string, EditableEnvironment>
   projects: ProjectBuildConfig
-  servers: string[]
+  servers: ServerSummary[]
+}
+
+export interface ServerSummary {
+  key: string
+  label: string
+  host: string
+  port: number
+  deploy_path: string
 }
 
 export interface ArtifactConfig {
-  build_output: string
-  deploy_script: string
-  rename_to: string
+  key: string
+  output: string
+  upload_as: string
 }
 
-export interface SubProjectEnvironmentConfig {
-  build_cmd: string
-  build_output: string
-  deploy_script: string
-  rename_to: string
+export interface BuildConfig {
+  command: string
   artifacts: ArtifactConfig[]
-  server: string
-  disabled: boolean | null
 }
 
-export interface SubProjectBuildConfig {
+export interface DeploymentConfig {
   label: string
+  server: string
+  script: string
+  disabled: boolean | null
+  build_override?: BuildConfig
+}
+
+export interface UnitEnvironmentConfig {
+  disabled: boolean | null
+  build: BuildConfig
+  deployments: Record<string, DeploymentConfig>
+}
+
+export interface ComponentBuildConfig {
+  label: string
+  path: string
   build_type: '' | 'frontend' | 'backend'
-  env_overrides: Record<string, SubProjectEnvironmentConfig>
+  environments: Record<string, UnitEnvironmentConfig>
 }
 
 export interface ProjectBuildConfigItem {
   label: string
-  sub_projects: Record<string, SubProjectBuildConfig>
+  mode: 'single' | 'monorepo'
+  build_type: '' | 'frontend' | 'backend'
+  environments: Record<string, UnitEnvironmentConfig>
+  components: Record<string, ComponentBuildConfig>
 }
 
 export type ProjectBuildConfig = Record<string, ProjectBuildConfigItem>
@@ -144,6 +187,7 @@ export interface EnvironmentExtraLink {
 export interface EditableEnvironment {
   label: string
   disabled: boolean
+  servers: string[]
   links: {
     user_url: string
     admin_url: string
@@ -153,6 +197,7 @@ export interface EditableEnvironment {
 
 export interface EnvironmentAccessConfig {
   disabled: boolean
+  servers: string[]
   links: EditableEnvironment['links']
 }
 
@@ -223,11 +268,11 @@ export async function fetchTags(
 
 export async function fetchEnvironments(
   project?: string,
-  subProject?: string,
+  component?: string,
 ): Promise<Environment[]> {
   const params: Record<string, string> = {}
   if (project) params.project = project
-  if (subProject) params.sub_project = subProject
+  if (component) params.component = component
   return api.get('/api/environments', { params }) as unknown as Environment[]
 }
 

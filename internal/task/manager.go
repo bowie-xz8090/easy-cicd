@@ -40,7 +40,9 @@ type DeployRequest struct {
 	CommitMessage  string     `json:"commit_message"`
 	CommitTime     *time.Time `json:"commit_time"`
 	Environment    string     `json:"environment"`
-	SubProject     string     `json:"sub_project"`
+	Component      string     `json:"component"`
+	SubProject     string     `json:"sub_project,omitempty"`
+	Target         string     `json:"target"`
 	DeployPassword string     `json:"deploy_password"`
 }
 
@@ -49,7 +51,10 @@ type TaskStatus struct {
 	TaskID      string    `json:"task_id"`
 	Status      string    `json:"status"`
 	ProjectName string    `json:"project_name"`
-	SubProject  string    `json:"sub_project"`
+	Component   string    `json:"component"`
+	SubProject  string    `json:"sub_project,omitempty"`
+	Target      string    `json:"target"`
+	Server      string    `json:"server"`
 	Branch      string    `json:"branch"`
 	Environment string    `json:"environment"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -62,8 +67,13 @@ type DeployRecord struct {
 	ProjectOwner    string     `json:"project_owner"`
 	ProjectName     string     `json:"project_name"`
 	ProjectLabel    string     `json:"project_label"`
+	Component       string     `json:"component"`
+	ComponentLabel  string     `json:"component_label"`
 	SubProject      string     `json:"sub_project"`
 	SubProjectLabel string     `json:"sub_project_label"`
+	Target          string     `json:"target"`
+	TargetLabel     string     `json:"target_label"`
+	Server          string     `json:"server"`
 	Branch          string     `json:"branch"`
 	CommitMessage   string     `json:"commit_message"`
 	CommitTime      *time.Time `json:"commit_time,omitempty"`
@@ -92,13 +102,6 @@ type TaskManager interface {
 	ListRecords(filter RecordFilter) ([]DeployRecord, int, error)
 	ClearDeployHistory() (int, error)
 	CancelTask(taskID string) error
-}
-
-// validEnvironments defines the allowed deployment environments.
-var validEnvironments = map[string]bool{
-	"dev":  true,
-	"sit":  true,
-	"prod": true,
 }
 
 // validTransitions defines the allowed state transitions for deployment tasks.
@@ -265,9 +268,51 @@ func (m *taskManager) CreateTask(req DeployRequest) (*db.DeployTask, error) {
 		return nil, fmt.Errorf("environment must not be empty")
 	}
 
-	// Validate environment value.
-	if !validEnvironments[req.Environment] {
-		return nil, fmt.Errorf("invalid environment %q: must be one of dev, sit, prod", req.Environment)
+	cfg := m.getConfig()
+	component := strings.TrimSpace(req.Component)
+	if component == "" {
+		component = strings.TrimSpace(req.SubProject)
+	}
+	target := strings.TrimSpace(req.Target)
+	serverKey := ""
+	if cfg != nil {
+		if _, ok := cfg.Environments[req.Environment]; !ok {
+			return nil, fmt.Errorf("invalid environment %q", req.Environment)
+		}
+		environments, _, _, err := cfg.GetUnitEnvironments(req.ProjectName, component)
+		if err != nil {
+			return nil, err
+		}
+		unitEnvironment, ok := environments[req.Environment]
+		if !ok {
+			return nil, fmt.Errorf("environment %q is not configured for the selected project/component", req.Environment)
+		}
+		if target == "" {
+			enabledTargets := make([]string, 0, len(unitEnvironment.Deployments))
+			for key, deployment := range unitEnvironment.Deployments {
+				if deployment.Disabled == nil || !*deployment.Disabled {
+					enabledTargets = append(enabledTargets, key)
+				}
+			}
+			if len(enabledTargets) != 1 {
+				return nil, fmt.Errorf("target must be selected when environment %q has multiple deployment servers", req.Environment)
+			}
+			target = enabledTargets[0]
+		}
+		resolved, err := cfg.ResolveDeployment(req.ProjectName, component, req.Environment, target)
+		if err != nil {
+			return nil, err
+		}
+		if resolved.Deployment.Disabled != nil && *resolved.Deployment.Disabled {
+			return nil, fmt.Errorf("target %q is disabled", target)
+		}
+		serverKey = resolved.ServerKey
+	} else {
+		switch req.Environment {
+		case "dev", "sit", "prod":
+		default:
+			return nil, fmt.Errorf("invalid environment %q", req.Environment)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -275,7 +320,9 @@ func (m *taskManager) CreateTask(req DeployRequest) (*db.DeployTask, error) {
 		ID:            uuid.New().String(),
 		ProjectOwner:  req.ProjectOwner,
 		ProjectName:   req.ProjectName,
-		SubProject:    req.SubProject,
+		SubProject:    component,
+		TargetKey:     target,
+		ServerKey:     serverKey,
 		Branch:        req.Branch,
 		CommitMessage: req.CommitMessage,
 		CommitTime:    req.CommitTime,
@@ -323,21 +370,15 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 		return
 	}
 
-	// Sub-project is always required now.
-	if task.SubProject == "" {
-		m.failTask(task.ID, "sub_project must not be empty")
-		return
-	}
-
-	// Get sub-project config for the environment.
-	subProjEnvCfg, err := cfg.GetSubProjectConfigForEnv(task.ProjectName, task.SubProject, task.Environment)
+	// 解析不可歧义的部署目标。单体项目允许 component 为空，monorepo 必须选择真实组件。
+	deploymentPlan, err := cfg.ResolveDeployment(task.ProjectName, task.SubProject, task.Environment, task.TargetKey)
 	if err != nil {
 		m.failTask(task.ID, fmt.Sprintf("获取部署配置失败: %v", err))
 		return
 	}
+	m.appendLog(task.ID, "cloning", fmt.Sprintf("部署目标: %s (%s)", deploymentPlan.TargetLabel, deploymentPlan.ServerKey))
 
-	configuredBuildType := cfg.Projects[task.ProjectName].SubProjects[task.SubProject].BuildType
-	buildType, err := resolveBuildType(configuredBuildType, subProjEnvCfg.BuildCmd)
+	buildType, err := resolveBuildType(deploymentPlan.BuildType, deploymentPlan.Build.BuildCmd)
 	if err != nil {
 		m.failTask(task.ID, err.Error())
 		return
@@ -387,7 +428,13 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 	db.UpdateTaskStatus(m.database, task.ID, "building")
 	m.appendLog(task.ID, "building", "开始构建...")
 
-	if _, err := m.builder.Build(workDir, subProjEnvCfg.BuildCmd, task.Environment); err != nil {
+	if _, err := m.builder.Build(ctx, workDir, deploymentPlan.Build.BuildCmd, task.Environment, func(line string) {
+		m.appendLog(task.ID, "building", line)
+	}); err != nil {
+		if ctx.Err() != nil {
+			m.failTask(task.ID, ctxErrMsg(ctx))
+			return
+		}
 		m.failTask(task.ID, fmt.Sprintf("构建失败: %v", err))
 		return
 	}
@@ -403,89 +450,36 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 	deployCtx, cancelDeploy := context.WithTimeout(ctx, deployTimeout)
 	defer cancelDeploy()
 
-	// Get server config for the target environment.
-	serverConfig, err := cfg.GetServerConfigForSubProject(task.ProjectName, task.SubProject, task.Environment)
-	if err != nil {
-		m.failTask(task.ID, fmt.Sprintf("获取服务器配置失败: %v", err))
-		return
-	}
-
-	// Multi-artifact deploy: if artifacts list is configured, deploy each one.
-	if len(subProjEnvCfg.Artifacts) > 0 {
-		for i, artifact := range subProjEnvCfg.Artifacts {
-			m.appendLog(task.ID, "deploying", fmt.Sprintf("部署产物 [%d/%d]: %s", i+1, len(subProjEnvCfg.Artifacts), artifact.BuildOutput))
-
-			artifactPath := filepath.Join(workDir, artifact.BuildOutput)
-
-			// If artifact is a directory, tar it first.
-			m.appendLog(task.ID, "deploying", fmt.Sprintf("准备产物 [%s]...", artifact.BuildOutput))
-			artifactPath, err = m.prepareArtifact(artifactPath, artifact.RenameTo)
-			if err != nil {
-				m.failTask(task.ID, fmt.Sprintf("产物准备失败 [%s]: %v", artifact.BuildOutput, err))
-				return
-			}
-
-			// Upload artifact.
-			m.appendLog(task.ID, "deploying", fmt.Sprintf("上传产物 [%s]...", filepath.Base(artifactPath)))
-			if err := m.deployer.Upload(deployCtx, artifactPath, serverConfig); err != nil {
-				if msg := deployCtxErrMsg(deployCtx, err); msg != "" {
-					m.failTask(task.ID, msg)
-					return
-				}
-				m.failTask(task.ID, fmt.Sprintf("产物上传失败 [%s]: %v", artifact.BuildOutput, err))
-				return
-			}
-			m.appendLog(task.ID, "deploying", fmt.Sprintf("产物上传完成 [%s]", filepath.Base(artifactPath)))
-
-			// Execute deploy script.
-			if artifact.DeployScript != "" {
-				m.appendLog(task.ID, "deploying", fmt.Sprintf("执行部署脚本 [%s]...", artifact.BuildOutput))
-				if _, err := m.deployer.Execute(deployCtx, serverConfig, artifact.DeployScript); err != nil {
-					if msg := deployCtxErrMsg(deployCtx, err); msg != "" {
-						m.failTask(task.ID, msg)
-						return
-					}
-					m.failTask(task.ID, fmt.Sprintf("部署脚本执行失败 [%s]: %v", artifact.BuildOutput, err))
-					return
-				}
-			}
-		}
-	} else {
-		// Single artifact deploy.
-		artifactPath := filepath.Join(workDir, subProjEnvCfg.BuildOutput)
-
-		// Prepare artifact (handles directory -> tar.gz, and rename).
-		m.appendLog(task.ID, "deploying", "准备产物...")
-		artifactPath, err = m.prepareArtifact(artifactPath, subProjEnvCfg.RenameTo)
+	// 所有产物先准备并上传，最后只执行一次目标服务器脚本。
+	// 这避免多产物场景依赖“把脚本挂在最后一个产物上”的隐式顺序。
+	for index, artifact := range deploymentPlan.Build.Artifacts {
+		m.appendLog(task.ID, "deploying", fmt.Sprintf("准备产物 [%d/%d]: %s", index+1, len(deploymentPlan.Build.Artifacts), artifact.BuildOutput))
+		artifactPath := filepath.Join(workDir, artifact.BuildOutput)
+		artifactPath, err = m.prepareArtifact(artifactPath, artifact.RenameTo)
 		if err != nil {
-			m.failTask(task.ID, fmt.Sprintf("产物准备失败: %v", err))
+			m.failTask(task.ID, fmt.Sprintf("产物准备失败 [%s]: %v", artifact.BuildOutput, err))
 			return
 		}
-
-		// Upload artifact.
 		m.appendLog(task.ID, "deploying", fmt.Sprintf("上传产物 [%s]...", filepath.Base(artifactPath)))
-		if err := m.deployer.Upload(deployCtx, artifactPath, serverConfig); err != nil {
+		if err := m.deployer.Upload(deployCtx, artifactPath, deploymentPlan.Server); err != nil {
 			if msg := deployCtxErrMsg(deployCtx, err); msg != "" {
 				m.failTask(task.ID, msg)
 				return
 			}
-			m.failTask(task.ID, fmt.Sprintf("产物上传失败: %v", err))
+			m.failTask(task.ID, fmt.Sprintf("产物上传失败 [%s]: %v", artifact.BuildOutput, err))
 			return
 		}
 		m.appendLog(task.ID, "deploying", fmt.Sprintf("产物上传完成 [%s]", filepath.Base(artifactPath)))
+	}
 
-		// Execute deploy script.
-		if subProjEnvCfg.DeployScript != "" {
-			m.appendLog(task.ID, "deploying", "执行部署脚本...")
-			if _, err := m.deployer.Execute(deployCtx, serverConfig, subProjEnvCfg.DeployScript); err != nil {
-				if msg := deployCtxErrMsg(deployCtx, err); msg != "" {
-					m.failTask(task.ID, msg)
-					return
-				}
-				m.failTask(task.ID, fmt.Sprintf("部署脚本执行失败: %v", err))
-				return
-			}
+	m.appendLog(task.ID, "deploying", fmt.Sprintf("执行部署脚本 [%s]...", deploymentPlan.TargetLabel))
+	if _, err := m.deployer.Execute(deployCtx, deploymentPlan.Server, deploymentPlan.Deployment.DeployScript); err != nil {
+		if msg := deployCtxErrMsg(deployCtx, err); msg != "" {
+			m.failTask(task.ID, msg)
+			return
 		}
+		m.failTask(task.ID, fmt.Sprintf("部署脚本执行失败: %v", err))
+		return
 	}
 
 	m.appendLog(task.ID, "deploying", "部署完成")
@@ -553,7 +547,10 @@ func (m *taskManager) GetTaskStatus(taskID string) (*TaskStatus, error) {
 		TaskID:      task.ID,
 		Status:      task.Status,
 		ProjectName: task.ProjectName,
+		Component:   task.SubProject,
 		SubProject:  task.SubProject,
+		Target:      task.TargetKey,
+		Server:      task.ServerKey,
 		Branch:      task.Branch,
 		Environment: task.Environment,
 		CreatedAt:   task.CreatedAt,
@@ -623,14 +620,20 @@ func (m *taskManager) ListRecords(filter RecordFilter) ([]DeployRecord, int, err
 	cfg := m.getConfig()
 	for _, t := range tasks {
 		projectLabel := t.ProjectName
-		subProjectLabel := t.SubProject
+		componentLabel := t.SubProject
+		targetLabel := t.TargetKey
 		if cfg != nil {
 			if projCfg, ok := cfg.Projects[t.ProjectName]; ok {
 				if projCfg.Label != "" {
 					projectLabel = projCfg.Label
 				}
-				if subProjCfg, ok := projCfg.SubProjects[t.SubProject]; ok && subProjCfg.Label != "" {
-					subProjectLabel = subProjCfg.Label
+				if component, ok := projCfg.Components[t.SubProject]; ok && component.Label != "" {
+					componentLabel = component.Label
+				}
+				if t.TargetKey != "" {
+					if resolved, resolveErr := cfg.ResolveDeployment(t.ProjectName, t.SubProject, t.Environment, t.TargetKey); resolveErr == nil {
+						targetLabel = resolved.TargetLabel
+					}
 				}
 			}
 		}
@@ -639,8 +642,13 @@ func (m *taskManager) ListRecords(filter RecordFilter) ([]DeployRecord, int, err
 			ProjectOwner:    t.ProjectOwner,
 			ProjectName:     t.ProjectName,
 			ProjectLabel:    projectLabel,
+			Component:       t.SubProject,
+			ComponentLabel:  componentLabel,
 			SubProject:      t.SubProject,
-			SubProjectLabel: subProjectLabel,
+			SubProjectLabel: componentLabel,
+			Target:          t.TargetKey,
+			TargetLabel:     targetLabel,
+			Server:          t.ServerKey,
 			Branch:          t.Branch,
 			CommitMessage:   t.CommitMessage,
 			CommitTime:      t.CommitTime,

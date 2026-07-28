@@ -14,6 +14,7 @@
         <DeployPage @deployed="onDeployed" />
       </div>
       <div class="panel-right">
+        <EnvironmentLinks />
         <HistoryPage ref="historyRef" />
       </div>
     </main>
@@ -55,6 +56,7 @@ import { ref, onMounted } from 'vue'
 import DeployPage from './views/DeployPage.vue'
 import HistoryPage from './views/HistoryPage.vue'
 import ConfigPage from './views/ConfigPage.vue'
+import EnvironmentLinks from './components/EnvironmentLinks.vue'
 import { fetchEditableConfig, fetchSiteInfo } from './api/index'
 
 type Tab = 'deploy' | 'history' | 'config'
@@ -170,14 +172,14 @@ function onDeployed() {
 }
 
 .panel-left {
-  width: 30%;
+  width: 40%;
   min-width: 320px;
   border-right: 1px solid #e5e7eb;
-  overflow-y: auto;
+  overflow: visible;
 }
 
 .panel-right {
-  width: 70%;
+  width: 60%;
   overflow-y: auto;
 }
 

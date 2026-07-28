@@ -1,12 +1,17 @@
 package builder
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // Builder defines the interface for code fetching and project building.
@@ -17,7 +22,7 @@ type Builder interface {
 
 	// Build executes the given build command in workDir with BUILD_ENV set to env.
 	// Returns the combined stdout/stderr output on success, or an error with output on failure.
-	Build(workDir string, buildCmd string, env string) (string, error)
+	Build(ctx context.Context, workDir string, buildCmd string, env string, onOutput func(string)) (string, error)
 	CleanWorkDir(workDir string) error
 }
 
@@ -158,18 +163,78 @@ func sanitizeURL(rawURL string) string {
 
 // Build executes the build command in workDir with BUILD_ENV set to the given env value.
 // It returns the combined output on success, or an error containing the output on failure.
-func (b *builder) Build(workDir string, buildCmd string, env string) (string, error) {
-	cmd := exec.Command("sh", "-c", buildCmd)
+func (b *builder) Build(ctx context.Context, workDir string, buildCmd string, env string, onOutput func(string)) (string, error) {
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("build command canceled: %w", ctx.Err())
+	}
+
+	name, args := shellCommand(buildCmd)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), fmt.Sprintf("BUILD_ENV=%s", env))
 
 	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("build command failed: %s: %w", output.String(), err)
+	var outputMu sync.Mutex
+	appendOutput := func(line string) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		output.WriteString(line)
+		output.WriteByte('\n')
+		if onOutput != nil {
+			onOutput(line)
+		}
 	}
 
-	return output.String(), nil
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to capture build stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to capture build stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("build command failed to start: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go scanOutput(stdout, appendOutput, &wg)
+	go scanOutput(stderr, appendOutput, &wg)
+
+	err = cmd.Wait()
+	wg.Wait()
+
+	outputMu.Lock()
+	outputText := output.String()
+	outputMu.Unlock()
+
+	if err != nil {
+		if ctx.Err() != nil {
+			return outputText, fmt.Errorf("build command canceled: %w", ctx.Err())
+		}
+		return outputText, fmt.Errorf("build command failed: %w", err)
+	}
+
+	return outputText, nil
+}
+
+func scanOutput(reader io.Reader, onLine func(string), wg *sync.WaitGroup) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line != "" {
+			onLine(line)
+		}
+	}
+}
+
+func shellCommand(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd", []string{"/C", command}
+	}
+	return "sh", []string{"-c", command}
 }
