@@ -25,7 +25,7 @@ import (
 
 const (
 	taskTimeout   = 30 * time.Minute
-	deployTimeout = 5 * time.Minute
+	deployTimeout = 10 * time.Minute
 	frontendBuild = "frontend"
 	backendBuild  = "backend"
 )
@@ -37,6 +37,8 @@ type DeployRequest struct {
 	ProjectOwner   string     `json:"project_owner"`
 	ProjectName    string     `json:"project_name"`
 	Branch         string     `json:"branch"`
+	RefType        string     `json:"ref_type"`
+	CommitID       string     `json:"commit_id"`
 	CommitMessage  string     `json:"commit_message"`
 	CommitTime     *time.Time `json:"commit_time"`
 	Environment    string     `json:"environment"`
@@ -183,7 +185,7 @@ func ctxErrMsg(ctx context.Context) string {
 
 func deployCtxErrMsg(ctx context.Context, err error) string {
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
-		return "部署超时（超过5分钟），已自动中断"
+		return "部署超时（超过10分钟），已自动中断"
 	}
 	if ctx.Err() != nil {
 		return ctxErrMsg(ctx)
@@ -264,6 +266,13 @@ func (m *taskManager) CreateTask(req DeployRequest) (*db.DeployTask, error) {
 	if req.Branch == "" {
 		return nil, fmt.Errorf("branch must not be empty")
 	}
+	refType := strings.TrimSpace(req.RefType)
+	if refType == "" {
+		refType = "branch"
+	}
+	if refType != "branch" && refType != "tag" {
+		return nil, fmt.Errorf("ref_type must be branch or tag")
+	}
 	if req.Environment == "" {
 		return nil, fmt.Errorf("environment must not be empty")
 	}
@@ -324,6 +333,8 @@ func (m *taskManager) CreateTask(req DeployRequest) (*db.DeployTask, error) {
 		TargetKey:     target,
 		ServerKey:     serverKey,
 		Branch:        req.Branch,
+		RefType:       refType,
+		CommitID:      strings.TrimSpace(req.CommitID),
 		CommitMessage: req.CommitMessage,
 		CommitTime:    req.CommitTime,
 		Environment:   req.Environment,
@@ -405,12 +416,20 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 		safeWorkDirSegment(task.ProjectName),
 	)
 
-	// Clone or pull the code.
-	if err := m.builder.CloneOrPull(repoURL, task.Branch, workDir); err != nil {
+	refLabel := "分支"
+	if task.RefType == "tag" {
+		refLabel = "标签"
+	}
+	m.appendLog(task.ID, "cloning", fmt.Sprintf("代码引用: %s %s", refLabel, task.Branch))
+
+	// Fetch and check out the exact ref selected by the user. The selected
+	// commit is verified as well so the UI and build cannot silently diverge.
+	actualCommit, err := m.builder.CloneOrPull(repoURL, task.Branch, task.RefType, task.CommitID, workDir)
+	if err != nil {
 		m.failTask(task.ID, fmt.Sprintf("代码拉取失败: %v", err))
 		return
 	}
-	m.appendLog(task.ID, "cloning", "代码拉取完成")
+	m.appendLog(task.ID, "cloning", fmt.Sprintf("代码拉取完成，实际构建提交: %s", actualCommit))
 
 	defer func() {
 		if err := m.builder.CleanWorkDir(workDir); err != nil {

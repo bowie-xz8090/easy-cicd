@@ -58,6 +58,8 @@ export interface DeployRequest {
   project_owner: string
   project_name: string
   branch: string
+  ref_type: 'branch' | 'tag'
+  commit_id?: string
   commit_message?: string
   commit_time?: string
   environment: string

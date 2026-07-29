@@ -15,13 +15,13 @@
       {{ errorMessage }}
     </div>
 
-    <pre v-if="logs !== null" class="log-content">{{ logs }}</pre>
+    <pre v-if="logs !== null" ref="logContentRef" class="log-content">{{ logs }}</pre>
     <pre v-else-if="!loading && !errorMessage" class="log-content log-empty">暂无日志内容</pre>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { nextTick, ref, onMounted } from 'vue'
 import { fetchTaskLogs } from '../api/index'
 
 const props = defineProps<{
@@ -31,13 +31,19 @@ const props = defineProps<{
 const logs = ref<string | null>(null)
 const loading = ref(false)
 const errorMessage = ref('')
+const logContentRef = ref<HTMLElement | null>(null)
 
 async function loadLogs() {
+  const previousScrollTop = logContentRef.value?.scrollTop ?? 0
   loading.value = true
   errorMessage.value = ''
   try {
     const result = await fetchTaskLogs(props.taskId)
     logs.value = result.logs || ''
+    await nextTick()
+    if (logContentRef.value) {
+      logContentRef.value.scrollTop = previousScrollTop
+    }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : '未知错误'
     errorMessage.value = `获取日志失败：${message}`

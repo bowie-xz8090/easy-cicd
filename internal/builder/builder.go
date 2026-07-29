@@ -16,9 +16,9 @@ import (
 
 // Builder defines the interface for code fetching and project building.
 type Builder interface {
-	// CloneOrPull clones a repository if the workDir doesn't exist,
-	// or fetches and checks out the specified branch if it does.
-	CloneOrPull(repoURL, branch, workDir string) error
+	// CloneOrPull clones or refreshes a repository, checks out the exact branch
+	// or tag requested by the user, and verifies the selected commit when set.
+	CloneOrPull(repoURL, ref, refType, expectedCommit, workDir string) (string, error)
 
 	// Build executes the given build command in workDir with BUILD_ENV set to env.
 	// Returns the combined stdout/stderr output on success, or an error with output on failure.
@@ -36,18 +36,18 @@ func NewBuilder() Builder {
 
 // CloneOrPull clones the repository into workDir if it doesn't exist,
 // or fetches and checks out the specified branch if workDir already exists.
-func (b *builder) CloneOrPull(repoURL, branch, workDir string) error {
+func (b *builder) CloneOrPull(repoURL, ref, refType, expectedCommit, workDir string) (string, error) {
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
-		// Directory doesn't exist — clone the repo.
-		return b.cloneRepo(repoURL, branch, workDir)
+		if err := b.cloneRepo(repoURL, workDir); err != nil {
+			return "", err
+		}
 	}
-	// Directory exists — fetch, checkout, and pull.
-	return b.pullRepo(repoURL, branch, workDir)
+	return b.checkoutRef(repoURL, ref, refType, expectedCommit, workDir)
 }
 
-// cloneRepo runs git clone for the specified branch into workDir.
-func (b *builder) cloneRepo(repoURL, branch, workDir string) error {
-	cmd := exec.Command("git", "clone", "--branch", branch, repoURL, workDir)
+// cloneRepo creates the checkout without selecting a potentially ambiguous ref.
+func (b *builder) cloneRepo(repoURL, workDir string) error {
+	cmd := exec.Command("git", "clone", "--no-checkout", repoURL, workDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -57,15 +57,15 @@ func (b *builder) cloneRepo(repoURL, branch, workDir string) error {
 	return nil
 }
 
-// pullRepo fetches, checks out, and pulls the specified ref (branch or tag) inside workDir.
-func (b *builder) pullRepo(repoURL, branch, workDir string) error {
+// checkoutRef fetches and checks out an explicitly typed branch or tag.
+func (b *builder) checkoutRef(repoURL, ref, refType, expectedCommit, workDir string) (string, error) {
 	if repoURL != "" {
 		remoteCmd := exec.Command("git", "remote", "set-url", "origin", repoURL)
 		remoteCmd.Dir = workDir
 		var remoteStderr bytes.Buffer
 		remoteCmd.Stderr = &remoteStderr
 		if err := remoteCmd.Run(); err != nil {
-			return fmt.Errorf("git remote set-url failed: %s: %w", sanitizeGitOutput(remoteStderr.String(), repoURL), err)
+			return "", fmt.Errorf("git remote set-url failed: %s: %w", sanitizeGitOutput(remoteStderr.String(), repoURL), err)
 		}
 	}
 
@@ -85,37 +85,49 @@ func (b *builder) pullRepo(repoURL, branch, workDir string) error {
 	var fetchStderr bytes.Buffer
 	fetchCmd.Stderr = &fetchStderr
 	if err := fetchCmd.Run(); err != nil {
-		return fmt.Errorf("git fetch failed: %s: %w", sanitizeGitOutput(fetchStderr.String(), repoURL), err)
+		return "", fmt.Errorf("git fetch failed: %s: %w", sanitizeGitOutput(fetchStderr.String(), repoURL), err)
 	}
 
-	// Try checkout as branch first: git checkout -f -B <branch> origin/<branch>
-	checkoutCmd := exec.Command("git", "checkout", "-f", "-B", branch, "origin/"+branch)
+	var target string
+	switch refType {
+	case "branch", "":
+		target = "refs/remotes/origin/" + ref
+	case "tag":
+		target = "refs/tags/" + ref
+	default:
+		return "", fmt.Errorf("unsupported ref type %q", refType)
+	}
+
+	// A detached checkout avoids local branch state and makes branch/tag names
+	// unambiguous because target is always a fully-qualified Git ref.
+	checkoutCmd := exec.Command("git", "checkout", "-f", "--detach", target)
 	checkoutCmd.Dir = workDir
 	var checkoutStderr bytes.Buffer
 	checkoutCmd.Stderr = &checkoutStderr
 	if err := checkoutCmd.Run(); err != nil {
-		// Branch checkout failed — try as tag: git checkout -f <tag>
-		tagCmd := exec.Command("git", "checkout", "-f", branch)
-		tagCmd.Dir = workDir
-		var tagStderr bytes.Buffer
-		tagCmd.Stderr = &tagStderr
-		if tagErr := tagCmd.Run(); tagErr != nil {
-			return fmt.Errorf("git checkout failed (not a branch or tag): %s: %w", sanitizeGitOutput(tagStderr.String(), repoURL), tagErr)
-		}
-		// Tag checkout succeeded, no pull needed for tags
-		return nil
+		return "", fmt.Errorf("git checkout %s %q failed: %s: %w", refType, ref, sanitizeGitOutput(checkoutStderr.String(), repoURL), err)
 	}
 
-	// git pull origin <branch>
-	pullCmd := exec.Command("git", "pull", "origin", branch)
-	pullCmd.Dir = workDir
-	var pullStderr bytes.Buffer
-	pullCmd.Stderr = &pullStderr
-	if err := pullCmd.Run(); err != nil {
-		return fmt.Errorf("git pull failed: %s: %w", sanitizeGitOutput(pullStderr.String(), repoURL), err)
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = workDir
+	headOutput, err := headCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD failed: %w", err)
+	}
+	actualCommit := strings.TrimSpace(string(headOutput))
+
+	expectedCommit = strings.TrimSpace(expectedCommit)
+	if expectedCommit != "" &&
+		!strings.HasPrefix(actualCommit, expectedCommit) &&
+		!strings.HasPrefix(expectedCommit, actualCommit) {
+		return "", fmt.Errorf(
+			"selected commit mismatch: expected %s, checked out %s",
+			expectedCommit,
+			actualCommit,
+		)
 	}
 
-	return nil
+	return actualCommit, nil
 }
 
 // CleanWorkDir removes generated files from an existing Git checkout while

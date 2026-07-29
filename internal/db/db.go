@@ -17,6 +17,8 @@ type DeployTask struct {
 	TargetKey     string     `json:"target" db:"target_key"`
 	ServerKey     string     `json:"server" db:"server_key"`
 	Branch        string     `json:"branch" db:"branch"`
+	RefType       string     `json:"ref_type,omitempty" db:"-"`
+	CommitID      string     `json:"commit_id,omitempty" db:"-"`
 	CommitMessage string     `json:"commit_message" db:"commit_message"`
 	CommitTime    *time.Time `json:"commit_time" db:"commit_time"`
 	Environment   string     `json:"environment" db:"environment"`

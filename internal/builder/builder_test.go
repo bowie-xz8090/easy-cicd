@@ -52,7 +52,7 @@ func TestCloneOrPull_Clone(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "clone-target")
 
 	b := NewBuilder()
-	err := b.CloneOrPull(bareRepo, "main", workDir)
+	_, err := b.CloneOrPull(bareRepo, "main", "branch", "", workDir)
 	require.NoError(t, err)
 
 	// Verify the clone created the directory with the expected file.
@@ -67,7 +67,7 @@ func TestCloneOrPull_Pull(t *testing.T) {
 	b := NewBuilder()
 
 	// First clone.
-	err := b.CloneOrPull(bareRepo, "main", workDir)
+	_, err := b.CloneOrPull(bareRepo, "main", "branch", "", workDir)
 	require.NoError(t, err)
 
 	// Push a new commit to the bare repo via a separate working copy.
@@ -81,7 +81,7 @@ func TestCloneOrPull_Pull(t *testing.T) {
 	runGit(t, pushDir, "push", "origin", "main")
 
 	// Pull should pick up the new commit.
-	err = b.CloneOrPull(bareRepo, "main", workDir)
+	_, err = b.CloneOrPull(bareRepo, "main", "branch", "", workDir)
 	require.NoError(t, err)
 
 	_, err = os.Stat(filepath.Join(workDir, "new.txt"))
@@ -101,7 +101,8 @@ func TestCloneOrPull_ForceRefreshMovedTag(t *testing.T) {
 	runGit(t, pushDir, "push", "origin", tagName)
 
 	b := NewBuilder()
-	require.NoError(t, b.CloneOrPull(bareRepo, "main", workDir))
+	_, err := b.CloneOrPull(bareRepo, "main", "branch", "", workDir)
+	require.NoError(t, err)
 
 	require.NoError(t, os.WriteFile(filepath.Join(pushDir, "moved.txt"), []byte("new tag target"), 0644))
 	runGit(t, pushDir, "add", ".")
@@ -109,7 +110,7 @@ func TestCloneOrPull_ForceRefreshMovedTag(t *testing.T) {
 	runGit(t, pushDir, "tag", "-f", tagName)
 	runGit(t, pushDir, "push", "--force", "origin", tagName)
 
-	err := b.CloneOrPull(bareRepo, tagName, workDir)
+	_, err = b.CloneOrPull(bareRepo, tagName, "tag", "", workDir)
 	require.NoError(t, err)
 
 	_, err = os.Stat(filepath.Join(workDir, "moved.txt"))
@@ -120,7 +121,7 @@ func TestCloneOrPull_InvalidRepo(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "bad-clone")
 
 	b := NewBuilder()
-	err := b.CloneOrPull("http://invalid-host-that-does-not-exist.local/repo.git", "main", workDir)
+	_, err := b.CloneOrPull("http://invalid-host-that-does-not-exist.local/repo.git", "main", "branch", "", workDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "git clone failed")
 }
@@ -142,16 +143,33 @@ func TestCloneOrPull_InvalidBranchOnPull(t *testing.T) {
 	b := NewBuilder()
 
 	// Clone with valid branch first.
-	err := b.CloneOrPull(bareRepo, "main", workDir)
+	_, err := b.CloneOrPull(bareRepo, "main", "branch", "", workDir)
 	require.NoError(t, err)
 
 	// Try to pull a non-existent branch.
-	err = b.CloneOrPull(bareRepo, "nonexistent-branch", workDir)
+	_, err = b.CloneOrPull(bareRepo, "nonexistent-branch", "branch", "", workDir)
 	require.Error(t, err)
-	assert.True(t,
-		strings.Contains(err.Error(), "git checkout failed") || strings.Contains(err.Error(), "git pull failed"),
-		"error should mention checkout or pull failure, got: %s", err.Error(),
-	)
+	assert.Contains(t, err.Error(), "git checkout branch")
+}
+
+func TestCloneOrPull_VerifiesSelectedCommit(t *testing.T) {
+	bareRepo := initBareRepo(t, "main")
+	workDir := filepath.Join(t.TempDir(), "commit-check")
+
+	b := NewBuilder()
+	_, err := b.CloneOrPull(bareRepo, "main", "branch", "0000000000000000000000000000000000000000", workDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "selected commit mismatch")
+}
+
+func TestCloneOrPull_RejectsUnknownRefType(t *testing.T) {
+	bareRepo := initBareRepo(t, "main")
+	workDir := filepath.Join(t.TempDir(), "bad-ref-type")
+
+	b := NewBuilder()
+	_, err := b.CloneOrPull(bareRepo, "main", "unknown", "", workDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported ref type")
 }
 
 func TestBuild_Success(t *testing.T) {
@@ -234,14 +252,15 @@ func TestCleanWorkDir_RemovesGeneratedFiles(t *testing.T) {
 	bareRepo := initBareRepo(t, "main")
 	workDir := filepath.Join(t.TempDir(), "clean-target")
 	b := NewBuilder()
-	require.NoError(t, b.CloneOrPull(bareRepo, "main", workDir))
+	_, err := b.CloneOrPull(bareRepo, "main", "branch", "", workDir)
+	require.NoError(t, err)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "node_modules"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "node_modules", "package.js"), []byte("generated"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "artifact.tar.gz"), []byte("generated"), 0644))
 
 	require.NoError(t, b.CleanWorkDir(workDir))
-	_, err := os.Stat(filepath.Join(workDir, "node_modules"))
+	_, err = os.Stat(filepath.Join(workDir, "node_modules"))
 	assert.True(t, os.IsNotExist(err))
 	_, err = os.Stat(filepath.Join(workDir, "artifact.tar.gz"))
 	assert.True(t, os.IsNotExist(err))

@@ -378,6 +378,8 @@ async function executeDeploy(deployPassword?: string) {
       project_owner: selectedProject.value.owner,
       project_name: selectedProject.value.name,
       branch: selectedRef.value,
+      ref_type: refType.value,
+      commit_id: selectedRefInfo.value?.commit_id,
       commit_message: selectedRefInfo.value?.commit_message,
       commit_time: selectedRefInfo.value?.commit_time,
       environment: selectedEnvironment.value,

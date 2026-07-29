@@ -187,7 +187,15 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { clearDeployHistory, fetchRecords, fetchEnvironments, cancelDeploy, type DeployRecord, type Environment } from '../api/index'
+import {
+  cancelDeploy,
+  clearDeployHistory,
+  fetchEnvironments,
+  fetchRecords,
+  fetchTaskStatus,
+  type DeployRecord,
+  type Environment,
+} from '../api/index'
 import LogViewer from '../components/LogViewer.vue'
 
 // --- Reactive state ---
@@ -254,8 +262,8 @@ function formatTime(timeStr: string): string {
 }
 
 // --- Data loading ---
-async function loadRecords() {
-  loading.value = true
+async function loadRecords(showLoading = true) {
+  if (showLoading) loading.value = true
   errorMessage.value = ''
   try {
     const params: Record<string, string | number> = {
@@ -281,7 +289,7 @@ async function loadRecords() {
     const message = err instanceof Error ? err.message : '未知错误'
     errorMessage.value = `获取部署记录失败：${message}`
   } finally {
-    loading.value = false
+    if (showLoading) loading.value = false
   }
 }
 
@@ -328,8 +336,7 @@ function splitLabelTags(label: string): string[] {
 }
 
 function handleRefresh() {
-  selectedRecordId.value = null
-  loadRecords()
+  loadRecords(false)
 }
 
 function handleRowClick(recordId: string) {
@@ -350,7 +357,7 @@ async function handleCancel(taskId: string) {
   if (!confirm('确定要中断该部署任务吗？')) return
   try {
     await cancelDeploy(taskId)
-    loadRecords()
+    loadRecords(false)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : '未知错误'
     errorMessage.value = `中断失败：${message}`
@@ -359,16 +366,34 @@ async function handleCancel(taskId: string) {
 
 // --- Lifecycle ---
 let pollingTimer: ReturnType<typeof setInterval> | null = null
+let pollingStatuses = false
+
+async function refreshRunningStatuses() {
+  if (pollingStatuses) return
+  const runningRecords = records.value.filter(record => isRunningStatus(record.status))
+  if (runningRecords.length === 0) return
+
+  pollingStatuses = true
+  try {
+    await Promise.all(runningRecords.map(async (record) => {
+      try {
+        const taskStatus = await fetchTaskStatus(record.id)
+        // Mutate only the status field. Keeping the existing record objects and
+        // table tree intact prevents an open LogViewer from being remounted.
+        record.status = taskStatus.status
+      } catch {
+        // A transient status request must not replace the whole page with an
+        // error or interrupt the user's current log reading position.
+      }
+    }))
+  } finally {
+    pollingStatuses = false
+  }
+}
 
 function startPolling() {
   stopPolling()
-  pollingTimer = setInterval(() => {
-    // Auto-refresh if there are running tasks
-    const hasRunning = records.value.some(r => isRunningStatus(r.status))
-    if (hasRunning) {
-      loadRecords()
-    }
-  }, 5000)
+  pollingTimer = setInterval(refreshRunningStatuses, 5000)
 }
 
 function stopPolling() {
@@ -380,7 +405,7 @@ function stopPolling() {
 
 // Expose refresh method for parent component
 function refresh() {
-  loadRecords()
+  loadRecords(false)
 }
 
 defineExpose({ refresh })

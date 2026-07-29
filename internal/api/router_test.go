@@ -538,8 +538,10 @@ func TestListProjects_EmptyList(t *testing.T) {
 
 func TestHandleDeploy_Success(t *testing.T) {
 	now := time.Now().UTC()
+	var capturedRequest task.DeployRequest
 	taskMgr := &mockTaskManager{
 		createTaskFn: func(req task.DeployRequest) (*db.DeployTask, error) {
+			capturedRequest = req
 			return &db.DeployTask{
 				ID:           "test-uuid-123",
 				ProjectOwner: req.ProjectOwner,
@@ -554,7 +556,7 @@ func TestHandleDeploy_Success(t *testing.T) {
 	}
 	r := setupRouterWithTaskMgr(&mockGiteaClient{}, testConfig(), taskMgr)
 
-	body := `{"project_owner":"org","project_name":"project-a","branch":"main","environment":"dev","target":"dev-server"}`
+	body := `{"project_owner":"org","project_name":"project-a","branch":"v1.2.3","ref_type":"tag","commit_id":"abc123","environment":"dev","target":"dev-server"}`
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodPost, "/api/deploy", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -571,6 +573,9 @@ func TestHandleDeploy_Success(t *testing.T) {
 	assert.Equal(t, "test-uuid-123", data["task_id"])
 	assert.Equal(t, "pending", data["status"])
 	assert.NotEmpty(t, data["created_at"])
+	assert.Equal(t, "v1.2.3", capturedRequest.Branch)
+	assert.Equal(t, "tag", capturedRequest.RefType)
+	assert.Equal(t, "abc123", capturedRequest.CommitID)
 }
 
 func TestHandleDeploy_InvalidJSON(t *testing.T) {
