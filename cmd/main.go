@@ -67,9 +67,10 @@ func main() {
 	distDir := "./web/dist"
 	if _, err := os.Stat(distDir); err == nil {
 		indexFile := distDir + "/index.html"
+		r.Use(frontendAssetCacheHeaders(basePath))
 		r.Static(joinAppPath(basePath, "/assets"), distDir+"/assets")
 		r.GET(joinAppPath(basePath, "/"), func(c *gin.Context) {
-			c.File(indexFile)
+			serveFrontendIndex(c, indexFile)
 		})
 		if basePath != "" {
 			r.GET(basePath, func(c *gin.Context) {
@@ -85,7 +86,7 @@ func main() {
 				return
 			}
 			if basePath == "" || requestPath == basePath || strings.HasPrefix(requestPath, basePath+"/") {
-				c.File(indexFile)
+				serveFrontendIndex(c, indexFile)
 				return
 			}
 			c.Status(http.StatusNotFound)
@@ -140,4 +141,21 @@ func displayBasePath(basePath string) string {
 		return "/"
 	}
 	return basePath
+}
+
+func frontendAssetCacheHeaders(basePath string) gin.HandlerFunc {
+	assetsPath := joinAppPath(basePath, "/assets") + "/"
+	return func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, assetsPath) {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		c.Next()
+	}
+}
+
+func serveFrontendIndex(c *gin.Context, indexFile string) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.File(indexFile)
 }

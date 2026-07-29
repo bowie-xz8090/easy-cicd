@@ -149,15 +149,38 @@
       </div>
     </form>
 
-    <div v-if="showPasswordModal" class="modal-backdrop">
-      <form class="password-modal" @submit.prevent="confirmPassword">
-        <h2>{{ passwordEnvLabel }}部署验证</h2>
-        <p>请输入部署密码后继续。</p>
-        <label>部署密码<input ref="passwordInputRef" v-model="passwordInput" :type="showPassword ? 'text' : 'password'" autocomplete="off" /></label>
-        <label class="show-password"><input v-model="showPassword" type="checkbox" /> 显示密码</label>
+    <div v-if="showConfirmModal" class="modal-backdrop">
+      <form class="deployment-confirm-modal" @submit.prevent="confirmDeployment">
+        <h2>确认部署</h2>
+        <p>请确认本次部署信息，确认后才会创建部署任务。</p>
+        <div class="deployment-summary">
+          <div><span>项目</span><strong>{{ selectedUnitName }}</strong></div>
+          <div v-if="selectedComponentInfo"><span>子项目</span><strong>{{ selectedUnitLabel }}</strong></div>
+          <div><span>{{ refType === 'branch' ? '分支' : '标签' }}</span><strong>{{ selectedRef }}</strong></div>
+          <div><span>环境</span><strong>{{ selectedEnvironmentInfo?.label }}</strong></div>
+          <div><span>部署目标</span><strong>{{ selectedTargetInfo?.label }}</strong></div>
+          <div><span>服务器</span><strong>{{ formatServerAddress(selectedTargetInfo) }}</strong></div>
+        </div>
+        <label v-if="selectedEnvironmentInfo?.need_password">
+          部署密码
+          <input
+            ref="passwordInputRef"
+            v-model="passwordInput"
+            :type="showPassword ? 'text' : 'password'"
+            name="deploy-verification-password"
+            autocomplete="new-password"
+            spellcheck="false"
+          />
+        </label>
+        <label v-if="selectedEnvironmentInfo?.need_password" class="show-password">
+          <input v-model="showPassword" type="checkbox" /> 显示密码
+        </label>
+        <div v-if="confirmationError" class="confirmation-error" role="alert">{{ confirmationError }}</div>
         <div class="modal-actions">
-          <button type="button" class="secondary-btn" @click="cancelPassword">取消</button>
-          <button class="deploy-btn" type="submit">确认</button>
+          <button type="button" class="secondary-btn" @click="cancelDeploymentConfirmation">取消</button>
+          <button class="deploy-btn" type="submit" :disabled="deploying">
+            {{ deploying ? '提交中…' : '确认部署' }}
+          </button>
         </div>
       </form>
     </div>
@@ -202,10 +225,10 @@ const deployResult = ref<DeployResponse | null>(null)
 const showDeployStatus = ref(false)
 const isProjectCascaderOpen = ref(false)
 const projectCascaderRef = ref<HTMLElement | null>(null)
-const showPasswordModal = ref(false)
+const showConfirmModal = ref(false)
 const passwordInput = ref('')
 const showPassword = ref(false)
-const passwordEnvLabel = ref('')
+const confirmationError = ref('')
 const passwordInputRef = ref<HTMLInputElement | null>(null)
 
 const refList = computed(() => refType.value === 'branch' ? branches.value : tags.value)
@@ -334,37 +357,35 @@ watch(refType, async () => {
 
 async function handleDeploy() {
   if (!canDeploy.value || !selectedProject.value || !selectedEnvironmentInfo.value || !selectedTargetInfo.value) return
+  errorMessage.value = ''
+  passwordInput.value = ''
+  showPassword.value = false
+  confirmationError.value = ''
+  showConfirmModal.value = true
   if (selectedEnvironmentInfo.value.need_password) {
-    passwordEnvLabel.value = selectedEnvironmentInfo.value.label
-    passwordInput.value = ''
-    showPassword.value = false
-    showPasswordModal.value = true
+    await nextTick()
+    passwordInputRef.value?.focus()
+  }
+}
+
+function cancelDeploymentConfirmation() {
+  showConfirmModal.value = false
+  passwordInput.value = ''
+  confirmationError.value = ''
+}
+
+async function confirmDeployment() {
+  const needsPassword = Boolean(selectedEnvironmentInfo.value?.need_password)
+  if (needsPassword && !passwordInput.value.trim()) {
+    confirmationError.value = '请输入部署密码'
     await nextTick()
     passwordInputRef.value?.focus()
     return
   }
-  if (!window.confirm(confirmMessage())) return
-  await executeDeploy()
-}
-
-function confirmMessage() {
-  const component = selectedComponent.value ? `\n组件：${selectedComponent.value}` : ''
-  return `确认部署？\n\n项目：${selectedProject.value?.label}${component}\n${refType.value === 'branch' ? '分支' : '标签'}：${selectedRef.value}\n环境：${selectedEnvironmentInfo.value?.label}\n部署目标：${selectedTargetInfo.value?.label}\n服务器：${formatServerAddress(selectedTargetInfo.value)}`
-}
-
-function cancelPassword() {
-  showPasswordModal.value = false
-  passwordInput.value = ''
-}
-
-async function confirmPassword() {
-  if (!passwordInput.value.trim()) {
-    errorMessage.value = '部署密码不能为空'
-    return
-  }
-  if (!window.confirm(confirmMessage())) return
-  showPasswordModal.value = false
-  await executeDeploy(passwordInput.value.trim())
+  const deployPassword = needsPassword ? passwordInput.value.trim() : undefined
+  showConfirmModal.value = false
+  confirmationError.value = ''
+  await executeDeploy(deployPassword)
   passwordInput.value = ''
 }
 
@@ -442,7 +463,7 @@ onUnmounted(() => document.removeEventListener('click', handleDocumentClick))
 .empty-option { padding: 20px; color: #94a3b8; text-align: center; }
 .ref-type-toggle { display: flex; gap: 18px; margin-bottom: 12px; }
 .field-label { display: block; margin-bottom: 6px; color: #475569; font-size: .88rem; font-weight: 600; }
-select, .password-modal input[type="password"], .password-modal input[type="text"] { box-sizing: border-box; width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; }
+select, .deployment-confirm-modal input[type="password"], .deployment-confirm-modal input[type="text"] { box-sizing: border-box; width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; }
 #ref-select { min-height: 50px; font-size: 1rem; font-weight: 500; }
 #ref-select option { font-size: 1rem; }
 .commit-card { display: flex; margin-top: 10px; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 7px; background: #f8fafc; color: #334155; }
@@ -464,10 +485,17 @@ select, .password-modal input[type="password"], .password-modal input[type="text
 .deploy-btn:disabled { cursor: not-allowed; opacity: .55; }
 .secondary-btn { border: 1px solid #cbd5e1; color: #334155; background: #fff; }
 .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 16px; background: rgb(15 23 42 / 50%); }
-.password-modal { display: flex; width: min(100%, 420px); flex-direction: column; gap: 12px; padding: 22px; border-radius: 10px; background: #fff; }
-.password-modal h2, .password-modal p { margin: 0; }
-.password-modal label:not(.show-password) { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.deployment-confirm-modal { display: flex; width: min(100%, 500px); flex-direction: column; gap: 14px; padding: 22px; border-radius: 10px; background: #fff; box-shadow: 0 24px 60px rgb(15 23 42 / 28%); }
+.deployment-confirm-modal h2, .deployment-confirm-modal p { margin: 0; }
+.deployment-confirm-modal p { color: #64748b; }
+.deployment-confirm-modal label:not(.show-password) { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.deployment-summary { overflow: hidden; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+.deployment-summary div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; }
+.deployment-summary div:last-child { border-bottom: 0; }
+.deployment-summary span { color: #64748b; }
+.deployment-summary strong { overflow-wrap: anywhere; }
 .show-password { display: flex; align-items: center; gap: 7px; }
+.confirmation-error { padding: 9px 11px; border: 1px solid #fecaca; border-radius: 7px; color: #b91c1c; background: #fef2f2; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 @media (max-width: 680px) {
   .cascader-panel { grid-template-columns: 1fr; }

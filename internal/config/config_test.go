@@ -194,6 +194,27 @@ func TestResolveDeployment_Exists(t *testing.T) {
 	assert.Equal(t, "开发服务", resolved.TargetLabel)
 }
 
+func TestResolveDeployment_ServerBuildCommandOverridesOnlyCommand(t *testing.T) {
+	path := writeTestConfig(t, validYAML)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	project := cfg.Projects["my-project"]
+	dev := project.Environments["dev"]
+	deployment := dev.Deployments["dev-server"]
+	deployment.BuildCommand = "API_BASE=/special npm run build:dev"
+	dev.Deployments["dev-server"] = deployment
+	project.Environments["dev"] = dev
+	cfg.Projects["my-project"] = project
+
+	resolved, err := cfg.ResolveDeployment("my-project", "", "dev", "dev-server")
+	require.NoError(t, err)
+	assert.Equal(t, "API_BASE=/special npm run build:dev", resolved.Build.BuildCmd)
+	require.Len(t, resolved.Build.Artifacts, 1)
+	assert.Equal(t, "./dist", resolved.Build.Artifacts[0].BuildOutput)
+	assert.Equal(t, "web.tar.gz", resolved.Build.Artifacts[0].RenameTo)
+}
+
 func TestResolveDeployment_NotFound(t *testing.T) {
 	path := writeTestConfig(t, validYAML)
 	cfg, err := Load(path)

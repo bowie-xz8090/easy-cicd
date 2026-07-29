@@ -184,9 +184,19 @@
                       <button class="text-danger" @click="removeDeploymentTarget(deployment.key)">移除</button>
                     </div>
                     <details class="inline-advanced">
-                      <summary>修改部署脚本</summary>
+                      <summary>修改构建命令和部署脚本</summary>
                       <div class="advanced-fields">
                         <label>服务器标识<input v-model.trim="deployment.value.label" /></label>
+                        <label>
+                          服务器专用构建命令
+                          <small>留空使用上方公共构建命令；仅在该服务器需要额外环境变量或参数时填写。</small>
+                          <textarea
+                            :value="deployment.value.build_command ?? deployment.value.build_override?.command ?? ''"
+                            :placeholder="currentEnvironmentRule.build.command"
+                            rows="3"
+                            @input="updateDeploymentBuildCommand(deployment.value, $event)"
+                          />
+                        </label>
                         <label>部署脚本<textarea v-model="deployment.value.script" rows="7" /></label>
                       </div>
                     </details>
@@ -586,6 +596,9 @@ function defaultDeployment(
   frontend: boolean,
 ): DeploymentConfig {
   const template = deploymentTemplate(environmentKey, serverKey, frontend)
+  const buildCommand = template?.deployment.build_command
+    ? adaptTemplateText(template.deployment.build_command, template.unitKey, unitKey)
+    : ''
   return {
     label: unitLabel || unitKey,
     server: serverKey,
@@ -593,7 +606,20 @@ function defaultDeployment(
       ? adaptTemplateText(template.deployment.script, template.unitKey, unitKey)
       : '',
     disabled: null,
+    ...(buildCommand ? { build_command: buildCommand } : {}),
   }
+}
+
+function updateDeploymentBuildCommand(deployment: DeploymentConfig, event: Event) {
+  const command = (event.target as HTMLTextAreaElement).value
+  // Editing this simple field intentionally converts any legacy full build
+  // override into a command-only override with shared artifacts.
+  delete deployment.build_override
+  if (!command.trim()) {
+    delete deployment.build_command
+    return
+  }
+  deployment.build_command = command
 }
 
 function defaultEnvironmentRule(
@@ -964,6 +990,7 @@ input:disabled { background:#f3f4f6; color:#64748b; }
 .advanced-panel { margin-top:20px; padding:14px; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; }
 .advanced-panel summary { padding:0; color:#334155; }
 .advanced-fields { display:flex; flex-direction:column; gap:12px; margin-top:13px; }
+.advanced-fields label small { color:#64748b; font-size:.78rem; font-weight:400; line-height:1.45; }
 .advanced-artifacts { display:flex; flex-direction:column; gap:9px; margin-top:16px; }
 .artifact-row { display:grid; grid-template-columns:.65fr 1.6fr auto; gap:10px; align-items:end; }
 .project-advanced { margin-top:0; }

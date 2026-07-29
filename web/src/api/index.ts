@@ -153,9 +153,10 @@ export interface BuildConfig {
 export interface DeploymentConfig {
   label: string
   server: string
+  build_command?: string
   script: string
   disabled: boolean | null
-  build_override?: BuildConfig
+  build_override?: BuildConfig | null
 }
 
 export interface UnitEnvironmentConfig {

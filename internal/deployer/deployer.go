@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"auto-deploy-platform/internal/config"
@@ -17,7 +19,7 @@ import (
 
 // Deployer defines the interface for deploying build artifacts to target servers via SSH.
 type Deployer interface {
-	// Upload transfers a local file to the target server's deploy path via SFTP-like SCP.
+	// Upload transfers a local file to the target server's deploy path over SSH.
 	Upload(ctx context.Context, localPath string, server config.ServerConfig) error
 
 	// Execute runs a script on the target server via SSH and returns the stdout output.
@@ -82,11 +84,26 @@ func waitSession(ctx context.Context, client *ssh.Client, session *ssh.Session) 
 	}
 }
 
-// Upload transfers localPath to the target server's deploy path using SCP protocol over SSH.
+// Upload streams localPath to an explicit temporary file on the target server,
+// atomically moves it into place, and verifies the final file size.
 func (d *deployer) Upload(ctx context.Context, localPath string, server config.ServerConfig) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	fileInfo, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat local file %s: %w", localPath, err)
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return fmt.Errorf("local artifact is not a regular file: %s", localPath)
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer file.Close()
 
 	client, err := newSSHClient(server)
 	if err != nil {
@@ -94,13 +111,16 @@ func (d *deployer) Upload(ctx context.Context, localPath string, server config.S
 	}
 	defer client.Close()
 
-	// Ensure remote deploy directory exists
+	remotePath := path.Join(server.DeployPath, filepath.Base(localPath))
+	temporaryPath := remotePath + ".uploading"
+
+	// Ensure the configured remote deploy directory exists.
 	mkdirSession, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create SSH session: %w", err)
 	}
 	mkdirStop := closeOnCancel(ctx, client, mkdirSession)
-	if err := mkdirSession.Start(fmt.Sprintf("mkdir -p %s", server.DeployPath)); err != nil {
+	if err := mkdirSession.Start("mkdir -p " + shellQuote(server.DeployPath)); err != nil {
 		mkdirStop()
 		mkdirSession.Close()
 		return fmt.Errorf("failed to create remote deploy directory: %w", err)
@@ -113,60 +133,70 @@ func (d *deployer) Upload(ctx context.Context, localPath string, server config.S
 	mkdirStop()
 	mkdirSession.Close()
 
-	// Read local file
-	fileInfo, err := os.Stat(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to stat local file %s: %w", localPath, err)
-	}
-
-	fileData, err := os.ReadFile(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to read local file %s: %w", localPath, err)
-	}
-
-	// Open SSH session for SCP
+	// Stream to a temporary file, then atomically publish the final path.
 	session, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create SSH session: %w", err)
 	}
-	defer session.Close()
-
-	// Use SCP protocol to send the file
-	remotePath := filepath.Join(server.DeployPath, filepath.Base(localPath))
-
-	// Set up stdin pipe for SCP data
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
 	var stderr bytes.Buffer
+	session.Stdin = file
 	session.Stderr = &stderr
 
-	// Start SCP receive command on remote
-	if err := session.Start(fmt.Sprintf("scp -t %s", server.DeployPath)); err != nil {
-		return fmt.Errorf("failed to start remote scp: %w", err)
+	uploadCommand := fmt.Sprintf(
+		"cat > %s && chmod 0644 %s && mv -f %s %s",
+		shellQuote(temporaryPath),
+		shellQuote(temporaryPath),
+		shellQuote(temporaryPath),
+		shellQuote(remotePath),
+	)
+	if err := session.Start(uploadCommand); err != nil {
+		session.Close()
+		return fmt.Errorf("failed to start remote upload to %s: %w", remotePath, err)
 	}
 	stop := closeOnCancel(ctx, client, session)
-	defer stop()
-
-	// Send SCP protocol header: C<mode> <size> <filename>
-	fmt.Fprintf(stdin, "C0644 %d %s\n", fileInfo.Size(), filepath.Base(localPath))
-
-	// Send file content
-	if _, err := io.Copy(stdin, bytes.NewReader(fileData)); err != nil {
-		return fmt.Errorf("failed to send file data: %w", err)
-	}
-
-	// Send SCP end-of-file marker
-	fmt.Fprint(stdin, "\x00")
-	stdin.Close()
-
 	if err := waitSession(ctx, client, session); err != nil {
-		return fmt.Errorf("scp upload to %s failed: %s: %w", remotePath, stderr.String(), err)
+		stop()
+		session.Close()
+		return fmt.Errorf("upload to %s failed: %s: %w", remotePath, stderr.String(), err)
 	}
+	stop()
+	session.Close()
 
+	// Do not report success until the exact final path exists with the expected size.
+	verifySession, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create upload verification session: %w", err)
+	}
+	var verifyStdout bytes.Buffer
+	var verifyStderr bytes.Buffer
+	verifySession.Stdout = &verifyStdout
+	verifySession.Stderr = &verifyStderr
+	verifyCommand := fmt.Sprintf("test -f %s && wc -c < %s", shellQuote(remotePath), shellQuote(remotePath))
+	if err := verifySession.Start(verifyCommand); err != nil {
+		verifySession.Close()
+		return fmt.Errorf("failed to verify remote artifact %s: %w", remotePath, err)
+	}
+	verifyStop := closeOnCancel(ctx, client, verifySession)
+	if err := waitSession(ctx, client, verifySession); err != nil {
+		verifyStop()
+		verifySession.Close()
+		return fmt.Errorf("remote artifact verification failed for %s: %s: %w", remotePath, verifyStderr.String(), err)
+	}
+	verifyStop()
+	verifySession.Close()
+
+	remoteSize, err := strconv.ParseInt(strings.TrimSpace(verifyStdout.String()), 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid remote artifact size for %s: %q", remotePath, strings.TrimSpace(verifyStdout.String()))
+	}
+	if remoteSize != fileInfo.Size() {
+		return fmt.Errorf("remote artifact size mismatch for %s: expected %d bytes, got %d bytes", remotePath, fileInfo.Size(), remoteSize)
+	}
 	return nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // Execute runs the given script on the target server via SSH and returns stdout.

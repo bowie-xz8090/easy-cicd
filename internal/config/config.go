@@ -110,6 +110,7 @@ type ArtifactConfig struct {
 type DeploymentConfig struct {
 	Label         string       `yaml:"label,omitempty" json:"label"`
 	Server        string       `yaml:"server,omitempty" json:"server"`
+	BuildCommand  string       `yaml:"build_command,omitempty" json:"build_command,omitempty"`
 	DeployScript  string       `yaml:"script" json:"script"`
 	Disabled      *bool        `yaml:"disabled,omitempty" json:"disabled"`
 	BuildOverride *BuildConfig `yaml:"build_override,omitempty" json:"build_override,omitempty"`
@@ -314,6 +315,19 @@ func (c *AppConfig) validateUnitEnvironments(unit string, environments map[strin
 			}
 			if strings.TrimSpace(deployment.DeployScript) == "" {
 				return fmt.Errorf("config validation error: deploy script is empty for target %q of %q environment %q", targetKey, unit, envKey)
+			}
+			if deployment.BuildOverride != nil {
+				if strings.TrimSpace(deployment.BuildOverride.BuildCmd) == "" {
+					return fmt.Errorf("config validation error: build override command is empty for target %q of %q environment %q", targetKey, unit, envKey)
+				}
+				if len(deployment.BuildOverride.Artifacts) == 0 {
+					return fmt.Errorf("config validation error: build override has no artifacts for target %q of %q environment %q", targetKey, unit, envKey)
+				}
+				for index, artifact := range deployment.BuildOverride.Artifacts {
+					if strings.TrimSpace(artifact.BuildOutput) == "" {
+						return fmt.Errorf("config validation error: build override artifact %d output is empty for target %q of %q environment %q", index+1, targetKey, unit, envKey)
+					}
+				}
 			}
 		}
 	}
@@ -714,6 +728,10 @@ func (c *AppConfig) ResolveDeployment(projectKey, componentKey, environment, tar
 	build := env.Build
 	if deployment.BuildOverride != nil {
 		build = *deployment.BuildOverride
+	} else if strings.TrimSpace(deployment.BuildCommand) != "" {
+		// The beginner-facing server override changes only the command. Shared
+		// artifact definitions continue to come from the environment rule.
+		build.BuildCmd = deployment.BuildCommand
 	}
 	project := c.Projects[projectKey]
 	targetLabel := deployment.Label

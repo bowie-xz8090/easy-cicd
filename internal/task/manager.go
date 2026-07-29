@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -479,7 +480,13 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 			m.failTask(task.ID, fmt.Sprintf("产物准备失败 [%s]: %v", artifact.BuildOutput, err))
 			return
 		}
-		m.appendLog(task.ID, "deploying", fmt.Sprintf("上传产物 [%s]...", filepath.Base(artifactPath)))
+		remoteArtifactPath := path.Join(deploymentPlan.Server.DeployPath, filepath.Base(artifactPath))
+		m.appendLog(task.ID, "deploying", fmt.Sprintf(
+			"上传产物 [%s] 到 [%s:%s]...",
+			filepath.Base(artifactPath),
+			deploymentPlan.Server.Host,
+			remoteArtifactPath,
+		))
 		if err := m.deployer.Upload(deployCtx, artifactPath, deploymentPlan.Server); err != nil {
 			if msg := deployCtxErrMsg(deployCtx, err); msg != "" {
 				m.failTask(task.ID, msg)
@@ -488,7 +495,7 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 			m.failTask(task.ID, fmt.Sprintf("产物上传失败 [%s]: %v", artifact.BuildOutput, err))
 			return
 		}
-		m.appendLog(task.ID, "deploying", fmt.Sprintf("产物上传完成 [%s]", filepath.Base(artifactPath)))
+		m.appendLog(task.ID, "deploying", fmt.Sprintf("产物上传并校验完成 [%s]", remoteArtifactPath))
 	}
 
 	m.appendLog(task.ID, "deploying", fmt.Sprintf("执行部署脚本 [%s]...", deploymentPlan.TargetLabel))
