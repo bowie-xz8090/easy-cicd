@@ -15,16 +15,16 @@
         />
       </div>
       <div class="filter-group">
-        <label for="filter-sub-project">组件关键字</label>
+        <label for="filter-sub-project">子项目关键字</label>
         <input
           id="filter-sub-project"
           v-model="filter.sub_project_keyword"
           type="text"
-          placeholder="组件名称或标签"
+          placeholder="子项目名称或标签"
         />
       </div>
       <div class="filter-group">
-        <label for="filter-env">环境</label>
+        <label for="filter-env">部署环境</label>
         <select id="filter-env" v-model="filter.environment">
           <option value="">全部</option>
           <option
@@ -77,13 +77,14 @@
       <table class="records-table">
         <thead>
           <tr>
+            <th>部署环境</th>
             <th>项目名称</th>
-            <th>组件</th>
+            <th>子项目名称</th>
             <th>分支/Tag</th>
             <th>最后 commit</th>
-            <th>环境</th>
             <th>部署目标</th>
             <th>状态</th>
+            <th>操作人</th>
             <th>触发时间</th>
           </tr>
         </thead>
@@ -94,6 +95,7 @@
               :class="{ 'row-selected': selectedRecordId === record.id }"
               @click="handleRowClick(record.id)"
             >
+              <td>{{ environmentLabel(record.environment) }}</td>
               <td>
                 <div class="name-with-tags">
                   <span class="entity-name">{{ record.project_name }}</span>
@@ -125,11 +127,10 @@
               <td>{{ record.branch }}</td>
               <td>
                 <div class="commit-info">
-                  <div class="commit-message">{{ record.commit_message || '-' }}</div>
+                  <CommitMessage :message="record.commit_message" />
                   <div class="commit-time">{{ record.commit_time ? formatTime(record.commit_time) : '暂无提交时间' }}</div>
                 </div>
               </td>
-              <td>{{ environmentLabel(record.environment) }}</td>
               <td>
                 <div class="target-info">
                   <strong>{{ record.target_label || record.target || '—' }}</strong>
@@ -149,10 +150,11 @@
                   中断
                 </button>
               </td>
+              <td class="operator-name">{{ record.operator || '—' }}</td>
               <td>{{ formatTime(record.created_at) }}</td>
             </tr>
             <tr v-if="selectedRecordId === record.id" class="log-row">
-              <td colspan="8">
+              <td colspan="9">
                 <LogViewer :task-id="record.id" />
               </td>
             </tr>
@@ -197,6 +199,7 @@ import {
   type Environment,
 } from '../api/index'
 import LogViewer from '../components/LogViewer.vue'
+import CommitMessage from '../components/CommitMessage.vue'
 
 // --- Reactive state ---
 const records = ref<DeployRecord[]>([])
@@ -434,6 +437,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.operator-name { white-space: nowrap; }
+.records-table th, .records-table td:first-child, .status-badge { white-space: nowrap; }
 .history-page {
   margin: 0;
   padding: 24px 16px;

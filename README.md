@@ -88,6 +88,18 @@ cp config.example.yaml config.yaml
 
 所有配置集中在一个 `config.yaml` 文件中，默认放在可执行文件同级目录。也可以通过环境变量指定路径。
 
+OIDC 登记信息保存在服务端 `oidc` 段，包括 `issuer`、`discovery_url`、`client_id`、`client_secret` 和 `redirect_uri`。`discovery_url` 必须是 Issuer 的 `/.well-known/openid-configuration` 地址。整个段落不通过配置 API 返回或修改；Client Secret 也禁止单独 JSON 序列化。
+
+`access.ip_whitelist` 为精确 IP 列表，实际地址仅在部署环境的 `config.yaml` 中维护，不在源码中固定，也不会自动扩大为整个网段。白名单优先免 SSO，右上角和部署记录显示完整 IP；其他来源必须通过 OIDC 登录，右上角及部署记录只显示脱敏手机号。OIDC 应用需允许 `openid phone` 范围，并在 ID Token 或 UserInfo 中披露 `phone_number`；带 `+86` 的号码会规范为国内 11 位手机号，无有效手机号不建立会话。
+
+默认以连接来源确定 IP，不信任请求自带的代理头。确有反向代理时，仅在 `access.trusted_proxies` 中登记可信代理的精确 IP 或 CIDR；代理必须覆盖或可靠追加转发头。白名单及代理配置随配置重载生效，`access` 整段只在服务端 YAML 中维护，不能由配置 API 覆盖。
+
+SSO 成功后建立 CICD 自己的 30 天固定会话，访问不续期，重启后仍有效，到期需重新发起 SSO。本期没有退出按钮和集中退出联动，不把身份平台 Token 放在浏览器中。会话 Cookie 使用 HttpOnly、SameSite=Lax，Secure 按已配置回调地址的协议决定，Cookie Path 为应用路径。OIDC 不可用时不会放行非白名单匿名请求；空白名单不会关闭认证。
+
+所有业务 API（包括配置、历史和日志）同样要求白名单或有效会话，内部部署密码和配置管理 `admin_token` 继续独立校验。写请求还需携带 `X-CICD-Request: 1`；浏览器同源校验不通过会拒绝请求。运维脚本在非白名单来源调用配置 API 时，必须同时携带有效会话 Cookie、自定义请求头和 `admin_token`。
+
+部署时的操作人由后端确定，SQLite 保存原始手机号或 IP 及来源 IP，业务接口只输出脱敏操作人。旧部署记录保留，操作人显示“—”。“最后 commit”仅在页面按 100 个 Unicode 字符折叠，通过“更多 / 收起”切换，存储内容不截断。
+
 配置采用版本 2 模型，完整可运行示例见 `config.example.yaml`。核心关系如下：
 
 ```text
@@ -627,6 +639,9 @@ auto-deploy-platform/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/auth/session` | 查询当前访问模式、脱敏身份和本地会话到期时间 |
+| GET | `/api/auth/oidc/login` | 发起 OIDC 登录，return_to 仅接受本站页面路径 |
+| GET | `/api/auth/oidc/callback` | 已登记的 OIDC 授权回调 |
 | GET | `/api/projects` | 获取 Gitea 项目列表 |
 | GET | `/api/projects/:owner/:repo/branches` | 获取项目分支列表 |
 | GET | `/api/projects/:owner/:repo/tags` | 获取项目 Tag 列表 |
@@ -646,7 +661,7 @@ auto-deploy-platform/
 
 平台支持在运行时动态修改配置，**无需重启容器或服务**，修改后立即生效。
 
-所有配置管理接口需要 `admin_token` 鉴权，在 `config.yaml` 中设置：
+所有配置管理接口先检查白名单或有效登录会话，再额外校验 `admin_token`，在 `config.yaml` 中设置：
 
 ```yaml
 admin_token: "your-secure-random-string"
@@ -654,21 +669,25 @@ admin_token: "your-secure-random-string"
 
 Web 配置管理页使用分区接口更新环境范围和项目规则，连接凭据不会返回浏览器。保存前会校验项目模式、环境、构建产物、部署目标和服务器关联；成功后同时更新内存与 `config.yaml`，新任务立即使用最新配置。
 
-`PUT /api/config` 仍保留给运维脚本做完整配置替换。调用方必须提交完整配置，并注意 `server.port` 的修改需要重启进程才能生效。
+`PUT /api/config` 仍保留给运维脚本做完整配置替换。调用方必须提交完整的非敏感配置；Gitea Token、`admin_token`、已有服务器密码和环境部署密码保留服务端当前值，不接受 JSON 覆盖。这些凭据只在服务端 `config.yaml` 中维护。`server.port` 的修改需要重启进程才能生效。
 
 #### 从磁盘重载配置（POST /api/config/reload）
 
 如果直接编辑了 `config.yaml` 文件（例如通过 `docker exec` 或挂载卷修改），调用此接口让服务读取最新配置：
 
+重载成功后只返回与 `/api/config/editor` 相同的可编辑配置视图，不返回 Gitea 配置、Token 或密码。Gitea Token 字段也禁止 JSON 序列化，避免配置对象被意外返回时泄露凭据。
+
 ```bash
 curl -X POST http://localhost:8080/api/config/reload \
+  -H "X-CICD-Request: 1" \
   -H "Authorization: Bearer your-secure-random-string"
 ```
 
 也可以通过 query 参数传递 token：
 
 ```bash
-curl -X POST "http://localhost:8080/api/config/reload?token=your-secure-random-string"
+curl -X POST "http://localhost:8080/api/config/reload?token=your-secure-random-string" \
+  -H "X-CICD-Request: 1"
 ```
 
 > **安全说明**：未设置 `admin_token` 时接口返回 403 不可用；token 错误返回 401。`admin_token` 不会出现在任何 API 响应中。

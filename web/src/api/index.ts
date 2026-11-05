@@ -90,6 +90,8 @@ export interface TaskLogs {
 }
 
 export interface DeployRecord {
+	operator: string
+	operator_type: 'ip' | 'oidc' | ''
   id: string
   project_owner: string
   project_name: string
@@ -221,12 +223,14 @@ export class ApiError extends Error {
 const api = axios.create({
   baseURL: getRuntimeBasePath(),
   timeout: 30000,
+  headers: { 'X-CICD-Request': '1' },
 })
 
 api.interceptors.response.use(
   (response) => {
     const body = response.data
     if (body.code !== 0) {
+      if (body.code === 40101) window.dispatchEvent(new Event('cicd-login-required'))
       throw new ApiError(body.code, body.message || '请求失败')
     }
     return body.data
@@ -235,13 +239,29 @@ api.interceptors.response.use(
     if (error instanceof ApiError) {
       throw error
     }
+    if (error.response?.data?.code === 40101) window.dispatchEvent(new Event('cicd-login-required'))
     const message =
       error.response?.data?.message || error.message || '网络请求失败'
-    throw new ApiError(-1, message)
+    throw new ApiError(error.response?.data?.code ?? -1, message)
   },
 )
 
 // --- API Functions ---
+
+export interface AccessSession {
+  authenticated: boolean
+  mode: 'ip' | 'oidc' | 'anonymous'
+  display_name: string
+  expires_at: string | null
+}
+
+export async function fetchSession(): Promise<AccessSession> {
+  return api.get('/api/auth/session') as unknown as AccessSession
+}
+
+export function oidcLoginURL(returnTo: string): string {
+  return `${getRuntimeBasePath()}/api/auth/oidc/login?return_to=${encodeURIComponent(returnTo)}`
+}
 
 export async function fetchSiteInfo(): Promise<{ title: string }> {
   return api.get('/api/site-info') as unknown as { title: string }

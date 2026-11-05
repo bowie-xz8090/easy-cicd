@@ -10,6 +10,9 @@ deploy.db-wal
 
 # Config with secrets
 config.yaml
+/.env
+/.env.*
+!/.env.example
 
 # Frontend
 web/node_modules/

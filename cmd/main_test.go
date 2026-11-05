@@ -1,14 +1,54 @@
 package main
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestSafeRequestLoggerDoesNotRecordCredentials(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(safeRequestLogger())
+	router.GET("/api/auth/oidc/callback", func(c *gin.Context) { c.Status(400) })
+	request := httptest.NewRequest("GET", "/api/auth/oidc/callback?code=private-code&state=private-state&token=private-admin", nil)
+	request.Header.Set("Authorization", "Bearer private-header")
+	request.Header.Set("Cookie", "cicd_session=private-session")
+	router.ServeHTTP(httptest.NewRecorder(), request)
+	if strings.Contains(output.String(), "private-") {
+		t.Fatal("request log contained authentication material")
+	}
+	if !strings.Contains(output.String(), "/api/auth/oidc/callback") {
+		t.Fatal("request path missing from safe log")
+	}
+}
+
+func TestDeepLinkAssetsResolveFromApplicationRoot(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(file, []byte(`<html><head><script src="./assets/app.js"></script></head></html>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"", "/cicd"} {
+		router := gin.New()
+		router.GET(prefix+"/nested/page", func(c *gin.Context) { serveFrontendIndex(c, file, prefix) })
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest("GET", prefix+"/nested/page", nil))
+		if !strings.Contains(response.Body.String(), `<base href="`+prefix+`/">`) {
+			t.Fatal("deep-link asset base was not set")
+		}
+	}
+}
 
 func TestFrontendAssetCacheHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)

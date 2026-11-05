@@ -20,6 +20,18 @@ import (
 )
 
 // mockGiteaClient is a test double for gitea.GiteaClient.
+// Existing business tests run as an explicitly whitelisted API client. Access
+// control tests use their own router without this fixture middleware.
+func legacyTestClient() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.RemoteAddr == "" {
+			c.Request.RemoteAddr = "192.0.2.1:1234"
+		}
+		c.Request.Header.Set("X-CICD-Request", "1")
+		c.Next()
+	}
+}
+
 type mockGiteaClient struct {
 	repos     []gitea.Repository
 	branches  []gitea.Branch
@@ -109,6 +121,7 @@ func setupRouter(giteaClient gitea.GiteaClient, cfg *config.AppConfig) *gin.Engi
 func setupRouterWithTaskMgr(giteaClient gitea.GiteaClient, cfg *config.AppConfig, taskMgr task.TaskManager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(legacyTestClient())
 	h := NewHandler(giteaClient, cfg, taskMgr)
 	h.RegisterRoutes(r)
 	return r
@@ -117,6 +130,7 @@ func setupRouterWithTaskMgr(giteaClient gitea.GiteaClient, cfg *config.AppConfig
 func setupRouterWithBasePath(giteaClient gitea.GiteaClient, cfg *config.AppConfig, basePath string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(legacyTestClient())
 	h := NewHandler(giteaClient, cfg, nil)
 	h.RegisterRoutesWithBasePath(r, basePath)
 	return r
@@ -171,6 +185,7 @@ func testConfig() *config.AppConfig {
 		},
 	}
 	return &config.AppConfig{
+		Access:        config.AccessConfig{IPWhitelist: []string{"192.0.2.1"}},
 		ConfigVersion: config.CurrentVersion,
 		Servers: map[string]config.ServerConfig{
 			"dev-server": {

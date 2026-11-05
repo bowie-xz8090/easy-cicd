@@ -8,7 +8,7 @@ export function getRuntimeBasePath(): string {
   if (assetScript?.src) {
     const pathname = new URL(assetScript.src, window.location.href).pathname
     const assetIndex = pathname.indexOf('/assets/')
-    if (assetIndex > 0) {
+    if (assetIndex >= 0) {
       return pathname.slice(0, assetIndex)
     }
   }

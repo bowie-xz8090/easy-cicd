@@ -2,14 +2,26 @@
   <div id="app">
     <header class="app-header">
       <h2>{{ siteTitle }}</h2>
-      <nav class="tabs" aria-label="主导航">
+      <nav v-if="accessSession?.authenticated" class="tabs" aria-label="主导航">
         <button :class="{ active: activeTab === 'deploy' }" @click="activeTab = 'deploy'">部署</button>
         <button :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">部署历史</button>
         <button :class="{ active: activeTab === 'config' }" @click="openConfigTab">配置管理</button>
       </nav>
+      <span v-if="accessSession?.authenticated" class="current-user" aria-label="当前用户">{{ accessSession.display_name }}</span>
     </header>
 
-    <main v-if="activeTab === 'deploy'" class="app-layout">
+    <main v-if="!accessSession?.authenticated" class="login-gate">
+      <section class="login-card" aria-labelledby="login-heading">
+        <template v-if="accessLoading"><h1 id="login-heading">正在检查访问权限</h1><p>请稍候…</p></template>
+        <template v-else>
+          <h1 id="login-heading">登录后才可操作</h1>
+          <p>{{ accessError || loginError || '请使用统一身份认证登录，继续访问自动部署平台。' }}</p>
+          <button v-if="accessError" class="primary-btn" @click="refreshSession">重试</button>
+          <a v-else class="primary-btn login-button" :href="loginURL">登录</a>
+        </template>
+      </section>
+    </main>
+    <main v-else-if="activeTab === 'deploy'" class="app-layout">
       <div class="panel-left">
         <DeployPage @deployed="onDeployed" />
       </div>
@@ -25,7 +37,7 @@
       <ConfigPage :admin-token="adminToken" />
     </main>
 
-    <div v-if="showAuthDialog" class="dialog-backdrop" @click.self="closeAuthDialog">
+    <div v-if="showAuthDialog && accessSession?.authenticated" class="dialog-backdrop" @click.self="closeAuthDialog">
       <form class="auth-dialog" @submit.prevent="verifyAdminToken">
         <h3>配置管理验证</h3>
         <label for="admin-token-input">admin_token</label>
@@ -52,12 +64,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import DeployPage from './views/DeployPage.vue'
 import HistoryPage from './views/HistoryPage.vue'
 import ConfigPage from './views/ConfigPage.vue'
 import EnvironmentLinks from './components/EnvironmentLinks.vue'
-import { fetchEditableConfig, fetchSiteInfo } from './api/index'
+import { fetchEditableConfig, fetchSiteInfo, oidcLoginURL } from './api/index'
+import { accessSession, accessLoading, accessError, refreshSession, requireLogin } from './auth'
 
 type Tab = 'deploy' | 'history' | 'config'
 
@@ -70,8 +83,49 @@ const showAuthDialog = ref(false)
 const tokenInput = ref('')
 const dialogError = ref('')
 const verifyingToken = ref(false)
+const loginError = ref('')
+const loginURL = computed(() => oidcLoginURL(window.location.pathname + window.location.search + window.location.hash))
+let expiryTimer: ReturnType<typeof setTimeout> | undefined
+
+function onLoginRequired() {
+  requireLogin()
+  showAuthDialog.value = false
+  adminToken.value = ''
+  tokenInput.value = ''
+  activeTab.value = 'deploy'
+}
+
+function scheduleExpiry() {
+  clearTimeout(expiryTimer)
+  const expires = accessSession.value?.expires_at
+  if (!expires || !accessSession.value?.authenticated) return
+  const remaining = new Date(expires).getTime() - Date.now()
+  if (remaining <= 0) { onLoginRequired(); return }
+  // Browser timers are limited to a signed 32-bit millisecond interval.
+  expiryTimer = setTimeout(scheduleExpiry, Math.min(remaining, 2_147_000_000))
+}
+
+function checkOnFocus() { void refreshSession() }
+watch(accessSession, (session) => {
+  if (!session?.authenticated) {
+    showAuthDialog.value = false
+    adminToken.value = ''
+    tokenInput.value = ''
+    activeTab.value = 'deploy'
+  }
+  scheduleExpiry()
+})
 
 onMounted(async () => {
+  window.addEventListener('cicd-login-required', onLoginRequired)
+  window.addEventListener('focus', checkOnFocus)
+  const current = new URL(window.location.href)
+  if (current.searchParams.has('auth_error')) {
+    loginError.value = 'SSO 登录未完成，请重试；如仍失败，请联系管理员核对应用准入和手机号授权。'
+    current.searchParams.delete('auth_error')
+    window.history.replaceState(null, '', current.pathname + current.search + current.hash)
+  }
+  await refreshSession()
   try {
     const info = await fetchSiteInfo()
     siteTitle.value = info.title
@@ -79,6 +133,12 @@ onMounted(async () => {
   } catch {
     // Use the default title when site metadata is unavailable.
   }
+})
+
+onUnmounted(() => {
+  window.removeEventListener('cicd-login-required', onLoginRequired)
+  window.removeEventListener('focus', checkOnFocus)
+  clearTimeout(expiryTimer)
 })
 
 function openConfigTab() {
@@ -117,6 +177,12 @@ function onDeployed() {
 </script>
 
 <style scoped>
+.current-user { margin-left: auto; font-size: .9rem; color: #374151; white-space: nowrap; }
+.login-gate { min-height: calc(100vh - 56px); display: grid; place-items: center; padding: 24px; box-sizing: border-box; background: #f5f7fb; }
+.login-card { width: min(100%, 420px); box-sizing: border-box; padding: 36px; text-align: center; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; box-shadow: 0 8px 30px rgb(0 0 0 / 5%); }
+.login-card h1 { font-size: 1.3rem; margin: 0 0 14px; }
+.login-card p { color: #6b7280; line-height: 1.7; margin-bottom: 24px; }
+.login-card .primary-btn { display: inline-block; padding: 10px 32px; border-radius: 6px; font-size: 1rem; text-decoration: none; cursor: pointer; }
 #app {
   min-height: 100vh;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

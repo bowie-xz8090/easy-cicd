@@ -16,6 +16,9 @@ type DeployTask struct {
 	SubProject    string     `json:"component" db:"sub_project"`
 	TargetKey     string     `json:"target" db:"target_key"`
 	ServerKey     string     `json:"server" db:"server_key"`
+	OperatorType  string     `json:"-" db:"operator_type"`
+	OperatorValue string     `json:"-" db:"operator_value"`
+	OperatorIP    string     `json:"-" db:"operator_ip"`
 	Branch        string     `json:"branch" db:"branch"`
 	RefType       string     `json:"ref_type,omitempty" db:"-"`
 	CommitID      string     `json:"commit_id,omitempty" db:"-"`
@@ -120,6 +123,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	_, _ = db.Exec(migrateAddCommitTimeSQL)
 	_, _ = db.Exec(migrateAddTargetKeySQL)
 	_, _ = db.Exec(migrateAddServerKeySQL)
+	if err := initAccessSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize access schema: %w", err)
+	}
 
 	if _, err := db.Exec(createIndexesSQL); err != nil {
 		db.Close()
@@ -133,8 +140,8 @@ func InitDB(dbPath string) (*sql.DB, error) {
 // The task's CreatedAt and UpdatedAt fields are stored as RFC3339 strings.
 func CreateTask(db *sql.DB, task *DeployTask) error {
 	query := `
-		INSERT INTO deploy_tasks (id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO deploy_tasks (id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at, operator_type, operator_value, operator_ip)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	var commitTime *string
 	if task.CommitTime != nil {
@@ -164,6 +171,7 @@ func CreateTask(db *sql.DB, task *DeployTask) error {
 		task.CreatedAt.UTC().Format(time.RFC3339),
 		task.UpdatedAt.UTC().Format(time.RFC3339),
 		finishedAt,
+		task.OperatorType, task.OperatorValue, task.OperatorIP,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create task: %w", err)
@@ -175,7 +183,7 @@ func CreateTask(db *sql.DB, task *DeployTask) error {
 // Returns nil and an error if the task is not found.
 func GetTaskByID(db *sql.DB, id string) (*DeployTask, error) {
 	query := `
-		SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at
+		SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at, operator_type, operator_value, operator_ip
 		FROM deploy_tasks WHERE id = ?
 	`
 	row := db.QueryRow(query, id)
@@ -202,6 +210,7 @@ func GetTaskByID(db *sql.DB, id string) (*DeployTask, error) {
 		&createdAt,
 		&updatedAt,
 		&finishedAt,
+		&task.OperatorType, &task.OperatorValue, &task.OperatorIP,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -350,7 +359,7 @@ func ListRecords(db *sql.DB, filter RecordFilter) ([]DeployTask, int, error) {
 
 	// Get paginated records.
 	offset := (filter.Page - 1) * filter.PageSize
-	dataQuery := "SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at FROM deploy_tasks " +
+	dataQuery := "SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at, operator_type, operator_value, operator_ip FROM deploy_tasks " +
 		where + " ORDER BY created_at DESC LIMIT ? OFFSET ?"
 	dataArgs := append(args, filter.PageSize, offset)
 
@@ -384,6 +393,7 @@ func ListRecords(db *sql.DB, filter RecordFilter) ([]DeployTask, int, error) {
 			&createdAt,
 			&updatedAt,
 			&finishedAt,
+			&task.OperatorType, &task.OperatorValue, &task.OperatorIP,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan record: %w", err)
 		}
@@ -445,7 +455,7 @@ func ListAllRecords(db *sql.DB, filter RecordFilter) ([]DeployTask, int, error) 
 		return nil, 0, fmt.Errorf("failed to count records: %w", err)
 	}
 
-	dataQuery := "SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at FROM deploy_tasks " +
+	dataQuery := "SELECT id, project_owner, project_name, sub_project, target_key, server_key, branch, commit_message, commit_time, environment, status, logs, error_message, created_at, updated_at, finished_at, operator_type, operator_value, operator_ip FROM deploy_tasks " +
 		where + " ORDER BY created_at DESC"
 	rows, err := db.Query(dataQuery, args...)
 	if err != nil {
@@ -485,6 +495,7 @@ func scanDeployTasks(rows *sql.Rows) ([]DeployTask, error) {
 			&createdAt,
 			&updatedAt,
 			&finishedAt,
+			&task.OperatorType, &task.OperatorValue, &task.OperatorIP,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan record: %w", err)
 		}

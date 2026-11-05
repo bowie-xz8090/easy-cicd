@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"auto-deploy-platform/internal/auth"
 	"auto-deploy-platform/internal/config"
 	"auto-deploy-platform/internal/gitea"
 	"auto-deploy-platform/internal/task"
@@ -19,7 +20,10 @@ type Handler struct {
 	cfg         *config.AppConfig
 	cfgManager  *config.Manager
 	taskManager task.TaskManager
+	access      *auth.Service
 }
+
+func (h *Handler) SetAccessService(service *auth.Service) { h.access = service }
 
 // NewHandler creates a new Handler with the given dependencies.
 func NewHandler(giteaClient gitea.GiteaClient, cfg *config.AppConfig, taskMgr task.TaskManager) *Handler {
@@ -55,10 +59,17 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 // RegisterRoutesWithBasePath registers API routes under an optional application base path.
 func (h *Handler) RegisterRoutesWithBasePath(r *gin.Engine, basePath string) {
+	// Forwarding headers are interpreted only by the access service's explicit proxy policy.
+	_ = r.SetTrustedProxies(nil)
+	if h.access == nil {
+		h.access = auth.NewService(nil, h.getLatestConfig, basePath)
+	}
 	api := r.Group(joinRoutePath(basePath, "/api"))
 	{
 		api.GET("/health", h.handleHealth)
 		api.GET("/site-info", h.handleSiteInfo)
+		h.access.RegisterRoutes(api)
+		api.Use(h.access.Middleware())
 		api.GET("/projects", h.handleListProjects)
 		api.GET("/projects/:owner/:repo/branches", h.handleListBranches)
 		api.GET("/projects/:owner/:repo/tags", h.handleListTags)
@@ -410,6 +421,7 @@ func (h *Handler) handleDeploy(c *gin.Context) {
 		}
 	}
 
+	req.Principal = auth.Principal(c)
 	deployTask, err := h.taskManager.CreateTask(req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -676,6 +688,12 @@ func (h *Handler) handleUpdateEditableConfig(c *gin.Context) {
 	}
 
 	updated := *h.cfgManager.Get()
+	for key, environment := range editable.Environments {
+		if existing, ok := updated.Environments[key]; ok {
+			environment.Password = existing.Password
+		}
+		editable.Environments[key] = environment
+	}
 	updated.Environments = editable.Environments
 	updated.Projects = editable.Projects
 	if err := h.cfgManager.Update(&updated); err != nil {
@@ -858,6 +876,9 @@ func (h *Handler) handleUpdateConfig(c *gin.Context) {
 	// values so a full configuration update cannot silently erase credentials.
 	current := h.cfgManager.Get()
 	newCfg.AdminToken = current.AdminToken
+	newCfg.Gitea.Token = current.Gitea.Token
+	newCfg.OIDC = current.OIDC
+	newCfg.Access = current.Access
 	for key, server := range newCfg.Servers {
 		if existing, ok := current.Servers[key]; ok {
 			server.Password = existing.Password
@@ -914,6 +935,6 @@ func (h *Handler) handleReloadConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "配置已从磁盘重新加载",
-		"data":    cfg,
+		"data":    editableConfig(cfg),
 	})
 }

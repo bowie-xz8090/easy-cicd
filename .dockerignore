@@ -20,6 +20,9 @@ web/dist
 
 # Config with secrets
 config.yaml
+.env
+.env.*
+!.env.example
 
 # Docker
 Dockerfile

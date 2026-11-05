@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -19,6 +21,8 @@ type AppConfig struct {
 	ConfigVersion int                      `yaml:"config_version" json:"config_version"`
 	Server        ServerAppConfig          `yaml:"server" json:"server"`
 	Gitea         GiteaConfig              `yaml:"gitea" json:"gitea"`
+	OIDC          OIDCConfig               `yaml:"oidc,omitempty" json:"-"`
+	Access        AccessConfig             `yaml:"access" json:"-"`
 	Servers       map[string]ServerConfig  `yaml:"servers" json:"servers"`
 	Environments  map[string]EnvConfig     `yaml:"environments" json:"environments"`
 	Projects      map[string]ProjectConfig `yaml:"projects" json:"projects"`
@@ -35,7 +39,22 @@ type ServerAppConfig struct {
 type GiteaConfig struct {
 	URL      string `yaml:"url" json:"url"`
 	Username string `yaml:"username" json:"username"`
-	Token    string `yaml:"token" json:"token"`
+	Token    string `yaml:"token" json:"-"`
+}
+
+// OIDCConfig is managed only through the server-side YAML configuration.
+type OIDCConfig struct {
+	Issuer       string `yaml:"issuer" json:"issuer"`
+	DiscoveryURL string `yaml:"discovery_url" json:"discovery_url"`
+	ClientID     string `yaml:"client_id" json:"client_id"`
+	ClientSecret string `yaml:"client_secret" json:"-"`
+	RedirectURI  string `yaml:"redirect_uri" json:"redirect_uri"`
+}
+
+// AccessConfig is server-managed; an empty whitelist requires SSO for every client.
+type AccessConfig struct {
+	IPWhitelist    []string `yaml:"ip_whitelist" json:"-"`
+	TrustedProxies []string `yaml:"trusted_proxies" json:"-"`
 }
 
 // ServerConfig 只保存连接资源。项目专属的部署脚本位于 DeploymentConfig。
@@ -239,6 +258,36 @@ func Load(path string) (*AppConfig, error) {
 }
 
 func (c *AppConfig) Validate() error {
+	for _, raw := range c.Access.IPWhitelist {
+		if _, err := netip.ParseAddr(raw); err != nil {
+			return fmt.Errorf("config validation error: access.ip_whitelist contains an invalid IP")
+		}
+	}
+	for _, raw := range c.Access.TrustedProxies {
+		if _, err := netip.ParsePrefix(raw); err != nil {
+			if _, err := netip.ParseAddr(raw); err != nil {
+				return fmt.Errorf("config validation error: access.trusted_proxies contains an invalid IP or CIDR")
+			}
+		}
+	}
+	if c.OIDC != (OIDCConfig{}) {
+		issuer, err := url.Parse(c.OIDC.Issuer)
+		if err != nil || issuer.Host == "" || (issuer.Scheme != "http" && issuer.Scheme != "https") || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" {
+			return fmt.Errorf("config validation error: invalid oidc.issuer")
+		}
+		for _, raw := range []string{c.OIDC.DiscoveryURL, c.OIDC.RedirectURI} {
+			u, err := url.Parse(raw)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+				return fmt.Errorf("config validation error: invalid OIDC discovery or redirect URL")
+			}
+		}
+		if c.OIDC.ClientID == "" || c.OIDC.ClientSecret == "" {
+			return fmt.Errorf("config validation error: OIDC client credentials must not be empty")
+		}
+		if c.OIDC.DiscoveryURL != strings.TrimRight(c.OIDC.Issuer, "/")+"/.well-known/openid-configuration" {
+			return fmt.Errorf("config validation error: oidc.discovery_url must match the configured issuer")
+		}
+	}
 	if c.Gitea.URL == "" {
 		return fmt.Errorf("config validation error: gitea.url must not be empty")
 	}

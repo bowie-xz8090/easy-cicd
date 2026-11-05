@@ -2,12 +2,16 @@ package main
 
 import (
 	"fmt"
+	"html"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"auto-deploy-platform/internal/api"
+	"auto-deploy-platform/internal/auth"
 	"auto-deploy-platform/internal/builder"
 	"auto-deploy-platform/internal/config"
 	"auto-deploy-platform/internal/db"
@@ -59,8 +63,13 @@ func main() {
 	handler := api.NewHandlerWithManager(giteaClient, cfgManager, taskMgr)
 
 	// Initialize Gin engine
-	r := gin.Default()
+	r := gin.New()
+	r.Use(safeRequestLogger(), gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) {
+		log.Print("Request failed with an internal panic")
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": -1, "message": "服务暂时不可用"})
+	}))
 	basePath := resolveBasePath(cfg)
+	handler.SetAccessService(auth.NewService(database, cfgManager.Get, basePath))
 	handler.RegisterRoutesWithBasePath(r, basePath)
 
 	// Serve frontend static files in production mode
@@ -70,7 +79,7 @@ func main() {
 		r.Use(frontendAssetCacheHeaders(basePath))
 		r.Static(joinAppPath(basePath, "/assets"), distDir+"/assets")
 		r.GET(joinAppPath(basePath, "/"), func(c *gin.Context) {
-			serveFrontendIndex(c, indexFile)
+			serveFrontendIndex(c, indexFile, basePath)
 		})
 		if basePath != "" {
 			r.GET(basePath, func(c *gin.Context) {
@@ -86,7 +95,7 @@ func main() {
 				return
 			}
 			if basePath == "" || requestPath == basePath || strings.HasPrefix(requestPath, basePath+"/") {
-				serveFrontendIndex(c, indexFile)
+				serveFrontendIndex(c, indexFile, basePath)
 				return
 			}
 			c.Status(http.StatusNotFound)
@@ -107,6 +116,15 @@ func main() {
 	log.Printf("Config file: %s (supports dynamic reload via API)", configPath)
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
+	}
+}
+
+// Query strings and request headers can contain credentials and authorization codes.
+func safeRequestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		started := time.Now()
+		c.Next()
+		log.Printf("HTTP %s %s status=%d elapsed=%s", c.Request.Method, c.Request.URL.EscapedPath(), c.Writer.Status(), time.Since(started))
 	}
 }
 
@@ -153,9 +171,20 @@ func frontendAssetCacheHeaders(basePath string) gin.HandlerFunc {
 	}
 }
 
-func serveFrontendIndex(c *gin.Context, indexFile string) {
+func serveFrontendIndex(c *gin.Context, indexFile string, basePaths ...string) {
 	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	c.Header("Pragma", "no-cache")
 	c.Header("Expires", "0")
-	c.File(indexFile)
+	content, err := os.ReadFile(indexFile)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	basePath := ""
+	if len(basePaths) > 0 {
+		basePath = basePaths[0]
+	}
+	// Relative Vite assets must resolve from the application root on deep links.
+	markup := strings.Replace(string(content), "<head>", "<head><base href=\""+html.EscapeString(joinAppPath(basePath, "/"))+"\">", 1)
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(markup))
 }

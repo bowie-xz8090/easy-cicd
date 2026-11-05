@@ -3,11 +3,14 @@ module auto-deploy-platform
 go 1.24.3
 
 require (
+	github.com/coreos/go-oidc/v3 v3.16.0
 	github.com/gin-gonic/gin v1.10.0
+	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.42
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.31.0
+	golang.org/x/oauth2 v0.30.0
 	gopkg.in/yaml.v3 v3.0.1
 	pgregory.net/rapid v1.2.0
 )

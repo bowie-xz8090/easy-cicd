@@ -20,6 +20,7 @@ import (
 	"auto-deploy-platform/internal/config"
 	"auto-deploy-platform/internal/db"
 	"auto-deploy-platform/internal/deployer"
+	"auto-deploy-platform/internal/identity"
 
 	"github.com/google/uuid"
 )
@@ -35,18 +36,19 @@ var ErrDeploymentsInProgress = errors.New("deployments are still in progress")
 
 // DeployRequest represents a request to create a new deployment task.
 type DeployRequest struct {
-	ProjectOwner   string     `json:"project_owner"`
-	ProjectName    string     `json:"project_name"`
-	Branch         string     `json:"branch"`
-	RefType        string     `json:"ref_type"`
-	CommitID       string     `json:"commit_id"`
-	CommitMessage  string     `json:"commit_message"`
-	CommitTime     *time.Time `json:"commit_time"`
-	Environment    string     `json:"environment"`
-	Component      string     `json:"component"`
-	SubProject     string     `json:"sub_project,omitempty"`
-	Target         string     `json:"target"`
-	DeployPassword string     `json:"deploy_password"`
+	Principal      identity.Principal `json:"-"`
+	ProjectOwner   string             `json:"project_owner"`
+	ProjectName    string             `json:"project_name"`
+	Branch         string             `json:"branch"`
+	RefType        string             `json:"ref_type"`
+	CommitID       string             `json:"commit_id"`
+	CommitMessage  string             `json:"commit_message"`
+	CommitTime     *time.Time         `json:"commit_time"`
+	Environment    string             `json:"environment"`
+	Component      string             `json:"component"`
+	SubProject     string             `json:"sub_project,omitempty"`
+	Target         string             `json:"target"`
+	DeployPassword string             `json:"deploy_password"`
 }
 
 // TaskStatus represents the current status of a deployment task.
@@ -66,6 +68,8 @@ type TaskStatus struct {
 
 // DeployRecord represents a deployment record for list results.
 type DeployRecord struct {
+	Operator        string     `json:"operator"`
+	OperatorType    string     `json:"operator_type"`
 	ID              string     `json:"id"`
 	ProjectOwner    string     `json:"project_owner"`
 	ProjectName     string     `json:"project_name"`
@@ -327,6 +331,9 @@ func (m *taskManager) CreateTask(req DeployRequest) (*db.DeployTask, error) {
 
 	now := time.Now().UTC()
 	task := &db.DeployTask{
+		OperatorType:  req.Principal.Type,
+		OperatorValue: req.Principal.Value,
+		OperatorIP:    req.Principal.IP,
 		ID:            uuid.New().String(),
 		ProjectOwner:  req.ProjectOwner,
 		ProjectName:   req.ProjectName,
@@ -664,6 +671,8 @@ func (m *taskManager) ListRecords(filter RecordFilter) ([]DeployRecord, int, err
 			}
 		}
 		record := DeployRecord{
+			Operator:        (identity.Principal{Type: t.OperatorType, Value: t.OperatorValue}).Display(),
+			OperatorType:    t.OperatorType,
 			ID:              t.ID,
 			ProjectOwner:    t.ProjectOwner,
 			ProjectName:     t.ProjectName,
