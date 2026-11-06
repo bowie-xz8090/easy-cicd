@@ -19,6 +19,10 @@ export async function refreshSession() {
 }
 
 export function requireLogin() {
-  accessSession.value = { authenticated: false, mode: 'anonymous', display_name: '', expires_at: null }
+  accessSession.value = { authenticated: false, authorized: false, mode: 'anonymous', display_name: '', expires_at: null }
   accessError.value = ''
+}
+
+export function denyAccess() {
+  if (accessSession.value) accessSession.value = { ...accessSession.value, authorized: false }
 }

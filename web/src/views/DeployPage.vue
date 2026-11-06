@@ -1,8 +1,11 @@
 <template>
   <div class="deploy-page">
     <header class="page-heading">
-      <h1>部署操作</h1>
-      <p>依次选择项目、代码引用、环境和部署服务器。</p>
+      <div>
+        <h1>部署操作</h1>
+        <p>依次选择项目、代码引用、环境和部署服务器。</p>
+      </div>
+      <button class="secondary-btn" type="button" @click="reloadPage">刷新</button>
     </header>
 
     <div v-if="errorMessage" class="alert error-alert" role="alert">{{ errorMessage }}</div>
@@ -93,8 +96,8 @@
           <option v-for="item in refList" :key="item.name" :value="item.name">{{ item.name }}</option>
         </select>
         <div v-if="selectedRefInfo" class="commit-card">
-          <strong>{{ selectedRefInfo.commit_message || '暂无提交说明' }}</strong>
-          <span>{{ shortCommitId(selectedRefInfo.commit_id) }} · {{ formattedSelectedCommitTime }}</span>
+          <CommitMessage :key="`${refType}:${selectedRef}:${selectedRefInfo.commit_id}`" :message="selectedRefInfo.commit_message || '暂无提交说明'" :limit="100" />
+          <span class="commit-meta">{{ shortCommitId(selectedRefInfo.commit_id) }} · {{ formattedSelectedCommitTime }}</span>
         </div>
       </section>
 
@@ -190,6 +193,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DeployStatus from '../components/DeployStatus.vue'
+import CommitMessage from '../components/CommitMessage.vue'
 import {
   fetchBranches,
   fetchEnvironments,
@@ -206,6 +210,10 @@ import {
 } from '../api/index'
 
 const emit = defineEmits<{ deployed: [] }>()
+
+function reloadPage() {
+  window.location.reload()
+}
 const projects = ref<Project[]>([])
 const branches = ref<Branch[]>([])
 const tags = ref<Tag[]>([])
@@ -321,19 +329,29 @@ async function loadProjects() {
   }
 }
 
+let refsRequestId = 0
+
 async function loadRefs() {
-  if (!selectedProject.value) return
+  const project = selectedProject.value
+  if (!project) return
+  const type = refType.value
+  const requestId = ++refsRequestId
   loadingRefs.value = true
   try {
-    if (refType.value === 'branch') {
-      branches.value = (await fetchBranches(selectedProject.value.owner, selectedProject.value.name)).sort((a, b) => compareText(a.name, b.name))
+    const refs = (type === 'branch'
+      ? await fetchBranches(project.owner, project.name)
+      : await fetchTags(project.owner, project.name)).sort((a, b) => compareText(a.name, b.name))
+    if (requestId !== refsRequestId) return
+    if (type === 'branch') {
+      branches.value = refs
     } else {
-      tags.value = (await fetchTags(selectedProject.value.owner, selectedProject.value.name)).sort((a, b) => compareText(a.name, b.name))
+      tags.value = refs
     }
+    selectedRef.value = refs.length === 1 ? refs[0].name : ''
   } catch (error) {
-    errorMessage.value = `获取${refType.value === 'branch' ? '分支' : '标签'}失败：${error instanceof Error ? error.message : '未知错误'}`
+    if (requestId === refsRequestId) errorMessage.value = `获取${type === 'branch' ? '分支' : '标签'}失败：${error instanceof Error ? error.message : '未知错误'}`
   } finally {
-    loadingRefs.value = false
+    if (requestId === refsRequestId) loadingRefs.value = false
   }
 }
 
@@ -431,7 +449,7 @@ onUnmounted(() => document.removeEventListener('click', handleDocumentClick))
 
 <style scoped>
 .deploy-page { padding: 24px 16px; color: #172033; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-.page-heading { margin-bottom: 24px; }
+.page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
 .page-heading h1 { margin: 0; font-size: 1.55rem; }
 .page-heading p { margin: 6px 0 0; color: #64748b; }
 .alert { margin-bottom: 16px; padding: 11px 14px; border: 1px solid; border-radius: 8px; }
@@ -467,7 +485,7 @@ select, .deployment-confirm-modal input[type="password"], .deployment-confirm-mo
 #ref-select { min-height: 50px; font-size: 1rem; font-weight: 500; }
 #ref-select option { font-size: 1rem; }
 .commit-card { display: flex; margin-top: 10px; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 7px; background: #f8fafc; color: #334155; }
-.commit-card span { color: #64748b; font-size: .82rem; }
+.commit-meta { color: #64748b; font-size: .82rem; }
 .choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .choice-card { display: grid; grid-template-columns: auto 1fr; column-gap: 9px; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; cursor: pointer; }
 .choice-card input { grid-row: 1 / span 2; align-self: center; }

@@ -31,7 +31,9 @@ RUN CGO_ENABLED=1 go build -ldflags '-extldflags "-static"' -o auto-deploy-platf
 # ============================================================
 # 阶段 3：最终运行镜像
 # ============================================================
-FROM alpine:3.20
+# Alpine 3.22 的 nodejs 是 22.23，满足 Vite 8 / rolldown 的 Node >=22.12。
+# 3.20 自带的 Node 20.15 会被 pnpm 跳过 musl 原生绑定，前端构建会失败。
+FROM alpine:3.22
 
 # 安装运行时依赖
 RUN apk add --no-cache \
@@ -45,7 +47,7 @@ RUN apk add --no-cache \
 
 # 安装 pnpm
 RUN npm config set registry https://registry.npmmirror.com && \
-    npm install -g pnpm && \
+    npm install -g pnpm@10.34.5 && \
     pnpm config set store-dir /root/.local/share/pnpm/store
 
 # 配置 Maven 镜像加速

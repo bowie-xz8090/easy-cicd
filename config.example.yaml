@@ -8,10 +8,52 @@ server:
 
 admin_token: "change-me-to-a-secure-random-string"
 
+access:
+  # 一项一个 IP 或 11 位手机号；手机号用户需先通过 SSO 登录。
+  whitelist:
+    - "172.16.106.1"
+    - "172.16.106.2"
+    - "172.16.106.3"
+    - "172.16.106.4"
+    - "172.16.106.5"
+    - "172.16.106.6"
+    - "172.16.106.7"
+    - "172.16.106.8"
+    - "172.16.106.9"
+    - "172.16.106.10"
+    - "172.16.105.5"
+    - "172.16.105.6"
+    - "172.16.105.7"
+    - "172.16.105.8"
+    - "172.16.105.9"
+    - "172.16.105.10"
+  trusted_proxies: []
+
+# 内网管理台代理：每个服务使用独立端口/浏览器来源，保留目标的原生路径。
+# SSH 凭据复用 servers，known_hosts 必须由可信渠道提供；不能跳过主机密钥校验。
+# web_proxy:
+#   known_hosts_file: "/app/ssh/known_hosts"
+#   routes:
+#     sit:
+#       nacos:
+#         target: "http://192.0.2.20:8848/nacos/"
+#         ssh_server: "sit-main"
+#         listen_port: 8081
+#         public_url: "https://deploy.example.com:8443"
+# public_url 是浏览器可达的服务入口；HTTPS 入口需要已有 TLS 终止代理。
+
 gitea:
   url: "http://gitea.example.com"
   username: "your-username"
   token: "your-access-token"
+
+# 非白名单 IP 用户需通过 OIDC 登录且手机号在白名单内；凭据仅在服务端维护。
+# oidc:
+#   issuer: "https://sso.example.com"
+#   discovery_url: "https://sso.example.com/.well-known/openid-configuration"
+#   client_id: "your-client-id"
+#   client_secret: "your-client-secret"
+#   redirect_uri: "https://deploy.example.com/api/auth/oidc/callback"
 
 # 服务器是独立资源。生产环境可以关联多台服务器。
 servers:

@@ -58,9 +58,6 @@
       <button class="refresh-btn" @click="handleRefresh" :disabled="loading">
         刷新
       </button>
-      <button class="clear-btn" @click="handleClear" :disabled="loading || total === 0">
-        &#28165;&#31354;
-      </button>
     </div>
 
     <!-- Error alert -->
@@ -75,6 +72,17 @@
     <!-- Records table -->
     <div v-else-if="records.length > 0" class="records-section">
       <table class="records-table">
+        <colgroup>
+          <col style="width: 7%" />
+          <col style="width: 9%" />
+          <col style="width: 10%" />
+          <col style="width: 7%" />
+          <col class="commit-column" />
+          <col style="width: 10%" />
+          <col style="width: 9%" />
+          <col style="width: 11%" />
+          <col style="width: 14%" />
+        </colgroup>
         <thead>
           <tr>
             <th>部署环境</th>
@@ -127,7 +135,7 @@
               <td>{{ record.branch }}</td>
               <td>
                 <div class="commit-info">
-                  <CommitMessage :message="record.commit_message" />
+                  <CommitMessage :message="record.commit_message" :limit="50" />
                   <div class="commit-time">{{ record.commit_time ? formatTime(record.commit_time) : '暂无提交时间' }}</div>
                 </div>
               </td>
@@ -151,7 +159,11 @@
                 </button>
               </td>
               <td class="operator-name">{{ record.operator || '—' }}</td>
-              <td>{{ formatTime(record.created_at) }}</td>
+              <td class="deployment-time">
+                <span>{{ formatTime(record.created_at) }}</span>
+                <span class="time-separator"> - </span>
+                <span class="finished-time">{{ record.finished_at ? formatTime(record.finished_at) : '' }}</span>
+              </td>
             </tr>
             <tr v-if="selectedRecordId === record.id" class="log-row">
               <td colspan="9">
@@ -191,7 +203,6 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
   cancelDeploy,
-  clearDeployHistory,
   fetchEnvironments,
   fetchRecords,
   fetchTaskStatus,
@@ -312,25 +323,6 @@ function handleReset() {
   loadRecords()
 }
 
-async function handleClear() {
-  if (!confirm('\u662f\u5426\u786e\u8ba4\u6e05\u7a7a\u90e8\u7f72\u5386\u53f2\uff1f')) return
-
-  loading.value = true
-  errorMessage.value = ''
-  try {
-    await clearDeployHistory()
-    selectedRecordId.value = null
-    filter.page = 1
-    records.value = []
-    total.value = 0
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : '\u672a\u77e5\u9519\u8bef'
-    errorMessage.value = `\u6e05\u7a7a\u90e8\u7f72\u5386\u53f2\u5931\u8d25\uff1a${message}`
-  } finally {
-    loading.value = false
-  }
-}
-
 function splitLabelTags(label: string): string[] {
   return (label || '')
     .split('/')
@@ -381,9 +373,10 @@ async function refreshRunningStatuses() {
     await Promise.all(runningRecords.map(async (record) => {
       try {
         const taskStatus = await fetchTaskStatus(record.id)
-        // Mutate only the status field. Keeping the existing record objects and
+        // Keep the existing record objects and
         // table tree intact prevents an open LogViewer from being remounted.
         record.status = taskStatus.status
+        record.finished_at = taskStatus.finished_at ?? null
       } catch {
         // A transient status request must not replace the whole page with an
         // error or interrupt the user's current log reading position.
@@ -437,9 +430,12 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.operator-name { white-space: nowrap; }
-.records-table th, .records-table td:first-child, .status-badge { white-space: nowrap; }
 .history-page {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  container-type: inline-size;
+  container-name: deployment-history;
   margin: 0;
   padding: 24px 16px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -554,29 +550,6 @@ h1 {
 	cursor: not-allowed;
 }
 
-.clear-btn {
-	margin-left: auto;
-	padding: 8px 20px;
-	background: #fff;
-	color: #dc2626;
-	border: 1px solid #dc2626;
-	border-radius: 6px;
-	font-size: 0.9rem;
-	font-weight: 600;
-	cursor: pointer;
-	transition: background 0.15s, color 0.15s;
-}
-
-.clear-btn:hover:not(:disabled) {
-	background: #fef2f2;
-}
-
-.clear-btn:disabled {
-	color: #fca5a5;
-	border-color: #fca5a5;
-	cursor: not-allowed;
-}
-
 /* Error alert */
 .error-alert {
   background: #fef2f2;
@@ -618,8 +591,11 @@ h1 {
 }
 
 /* Records table */
+.records-section { min-width: 0; }
+
 .records-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -637,26 +613,32 @@ h1 {
   font-weight: 600;
   color: #374151;
   border-bottom: 1px solid #e5e7eb;
+  overflow-wrap: anywhere;
 }
 
 .records-table td {
   padding: 10px 14px;
   font-size: 0.9rem;
   border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+  overflow-wrap: anywhere;
 }
 
 .name-with-tags {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
   flex-wrap: wrap;
-  min-width: 140px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .entity-name {
   color: #111827;
   font-weight: 500;
   overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 .entity-tags {
@@ -664,9 +646,13 @@ h1 {
   align-items: center;
   gap: 4px;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .label-chip {
+  box-sizing: border-box;
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   border: 1px solid;
@@ -690,7 +676,8 @@ h1 {
 }
 
 .commit-info {
-  max-width: 360px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .commit-message {
@@ -708,10 +695,13 @@ h1 {
 
 .target-info {
   display: flex;
-  min-width: 120px;
   flex-direction: column;
   gap: 3px;
 }
+
+.deployment-time { font-variant-numeric: tabular-nums; font-size: 0.8rem !important; }
+.deployment-time > span { display: block; }
+.time-separator { color: #64748b; }
 
 .target-info small {
   color: #6b7280;
@@ -737,6 +727,8 @@ h1 {
 
 /* Status badges */
 .status-badge {
+  box-sizing: border-box;
+  max-width: 100%;
   display: inline-block;
   padding: 2px 10px;
   border-radius: 10px;
@@ -765,8 +757,11 @@ h1 {
 }
 
 .cancel-btn {
-  margin-left: 8px;
-  padding: 2px 10px;
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 4px 0 0;
+  padding: 2px 6px;
   background: #fff;
   color: #dc2626;
   border: 1px solid #dc2626;
@@ -785,6 +780,24 @@ h1 {
   color: #fca5a5;
   border-color: #fca5a5;
   cursor: not-allowed;
+}
+
+/* Use the history panel's available width, including the embedded deploy view. */
+@container deployment-history (max-width: 1200px) {
+  .records-table th, .records-table td { padding: 8px 6px; }
+  .records-table th { font-size: 0.78rem; }
+  .records-table td { font-size: 0.82rem; }
+  .status-badge { padding: 2px 5px; font-size: 0.75rem; }
+  .label-chip { padding: 1px 4px; }
+  .log-row td { padding: 0; }
+}
+
+@container deployment-history (max-width: 560px) {
+  .records-table th, .records-table td { padding: 6px 3px; font-size: 0.75rem; }
+  .status-badge { padding: 2px 3px; }
+  .cancel-btn { padding: 2px; }
+  .commit-time { font-size: 0.72rem; }
+  .log-row td { padding: 0; }
 }
 
 /* Pagination */

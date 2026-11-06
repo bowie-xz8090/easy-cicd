@@ -110,3 +110,18 @@ func TestServeFrontendIndexDisablesCaching(t *testing.T) {
 		t.Fatalf("unexpected index Expires header: %q", got)
 	}
 }
+
+func TestPublicIconsAreServedAsImagesUnderBasePath(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("\x89PNG\r\n\x1a\nicon-data")
+	if err := os.WriteFile(filepath.Join(dir, "favicon-32.png"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	registerPublicIcons(router, "/cicd", dir)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest("GET", "/cicd/favicon-32.png", nil))
+	if response.Code != 200 || !bytes.Equal(content, response.Body.Bytes()) || !strings.HasPrefix(response.Header().Get("Content-Type"), "image/png") {
+		t.Fatal("favicon did not resolve to the actual PNG")
+	}
+}

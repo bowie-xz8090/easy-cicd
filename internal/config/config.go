@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"auto-deploy-platform/internal/identity"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,6 +25,7 @@ type AppConfig struct {
 	Gitea         GiteaConfig              `yaml:"gitea" json:"gitea"`
 	OIDC          OIDCConfig               `yaml:"oidc,omitempty" json:"-"`
 	Access        AccessConfig             `yaml:"access" json:"-"`
+	WebProxy      WebProxyConfig           `yaml:"web_proxy,omitempty" json:"-"`
 	Servers       map[string]ServerConfig  `yaml:"servers" json:"servers"`
 	Environments  map[string]EnvConfig     `yaml:"environments" json:"environments"`
 	Projects      map[string]ProjectConfig `yaml:"projects" json:"projects"`
@@ -51,10 +54,55 @@ type OIDCConfig struct {
 	RedirectURI  string `yaml:"redirect_uri" json:"redirect_uri"`
 }
 
-// AccessConfig is server-managed; an empty whitelist requires SSO for every client.
+// AccessConfig allows listed IPs directly and listed phone numbers after SSO.
+// An empty whitelist denies all business access, including authenticated users.
 type AccessConfig struct {
-	IPWhitelist    []string `yaml:"ip_whitelist" json:"-"`
+	Whitelist      []string `yaml:"whitelist" json:"-"`
 	TrustedProxies []string `yaml:"trusted_proxies" json:"-"`
+}
+
+// UnmarshalYAML migrates the old IP-only key. An explicitly provided whitelist,
+// including an empty list, takes precedence over the legacy key.
+func (a *AccessConfig) UnmarshalYAML(node *yaml.Node) error {
+	var values struct {
+		Whitelist      []string `yaml:"whitelist"`
+		IPWhitelist    []string `yaml:"ip_whitelist"`
+		TrustedProxies []string `yaml:"trusted_proxies"`
+	}
+	if err := node.Decode(&values); err != nil {
+		return err
+	}
+	a.Whitelist = values.IPWhitelist
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == "whitelist" {
+			a.Whitelist = values.Whitelist
+			break
+		}
+	}
+	a.TrustedProxies = values.TrustedProxies
+	return nil
+}
+
+func (a AccessConfig) AllowsIP(raw string) bool {
+	address, err := netip.ParseAddr(raw)
+	if err != nil {
+		return false
+	}
+	for _, entry := range a.Whitelist {
+		if candidate, err := netip.ParseAddr(entry); err == nil && candidate.Unmap() == address.Unmap() {
+			return true
+		}
+	}
+	return false
+}
+
+func (a AccessConfig) AllowsPhone(phone string) bool {
+	for _, entry := range a.Whitelist {
+		if entry == phone {
+			return true
+		}
+	}
+	return false
 }
 
 // ServerConfig 只保存连接资源。项目专属的部署脚本位于 DeploymentConfig。
@@ -210,6 +258,22 @@ func (m *Manager) Reload() (*AppConfig, error) {
 }
 
 func (m *Manager) Update(newCfg *AppConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.updateLocked(newCfg)
+}
+
+// UpdateWhitelist changes only admission rules and persists them before making
+// them active. Credentials, proxy trust and concurrent unrelated edits survive.
+func (m *Manager) UpdateWhitelist(whitelist []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	updated := cloneConfig(m.cfg)
+	updated.Access.Whitelist = append([]string{}, whitelist...)
+	return m.updateLocked(updated)
+}
+
+func (m *Manager) updateLocked(newCfg *AppConfig) error {
 	if newCfg == nil {
 		return fmt.Errorf("config validation error: config must not be nil")
 	}
@@ -229,9 +293,7 @@ func (m *Manager) Update(newCfg *AppConfig) error {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	m.mu.Lock()
 	m.cfg = normalized
-	m.mu.Unlock()
 	return nil
 }
 
@@ -258,9 +320,15 @@ func Load(path string) (*AppConfig, error) {
 }
 
 func (c *AppConfig) Validate() error {
-	for _, raw := range c.Access.IPWhitelist {
-		if _, err := netip.ParseAddr(raw); err != nil {
-			return fmt.Errorf("config validation error: access.ip_whitelist contains an invalid IP")
+	if err := c.validateWebProxy(); err != nil {
+		return err
+	}
+	for index, raw := range c.Access.Whitelist {
+		if _, err := netip.ParseAddr(raw); err == nil {
+			continue
+		}
+		if phone, err := identity.NormalizePhone(raw); err != nil || phone != raw {
+			return fmt.Errorf("config validation error: access.whitelist 第 %d 项必须为有效 IP 或 11 位手机号", index+1)
 		}
 	}
 	for _, raw := range c.Access.TrustedProxies {
@@ -385,6 +453,19 @@ func (c *AppConfig) validateUnitEnvironments(unit string, environments map[strin
 
 // Normalize 将旧 sub_projects 配置迁移到 v2 内存模型，并补齐环境服务器关联。
 func (c *AppConfig) Normalize() error {
+	entries := make([]string, 0, len(c.Access.Whitelist))
+	seen := map[string]bool{}
+	for _, raw := range c.Access.Whitelist {
+		entry := strings.TrimSpace(raw)
+		if address, err := netip.ParseAddr(entry); err == nil {
+			entry = address.Unmap().String()
+		}
+		if !seen[entry] {
+			entries = append(entries, entry)
+			seen[entry] = true
+		}
+	}
+	c.Access.Whitelist = entries
 	needsLegacyEnvironmentServers := c.ConfigVersion < CurrentVersion
 	if c.Servers == nil {
 		c.Servers = map[string]ServerConfig{}

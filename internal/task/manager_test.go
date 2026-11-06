@@ -186,6 +186,41 @@ func TestGetTaskStatus_Success(t *testing.T) {
 	assert.Equal(t, req.ProjectName, status.ProjectName)
 	assert.Equal(t, req.Branch, status.Branch)
 	assert.Equal(t, req.Environment, status.Environment)
+	assert.Nil(t, status.FinishedAt)
+}
+
+func TestGetTaskStatus_TerminalTime(t *testing.T) {
+	for _, terminal := range []string{"success", "failed"} {
+		t.Run(terminal, func(t *testing.T) {
+			mgr, cleanup := setupTestDB(t)
+			defer cleanup()
+			task, err := mgr.CreateTask(validRequest())
+			require.NoError(t, err)
+			require.NoError(t, db.UpdateTaskStatus(mgr.(*taskManager).database, task.ID, terminal))
+			status, err := mgr.GetTaskStatus(task.ID)
+			require.NoError(t, err)
+			require.NotNil(t, status.FinishedAt)
+			assert.Equal(t, terminal, status.Status)
+		})
+	}
+}
+
+func TestCancelTask_PreservesInterruptionTimeAfterWorkerFailure(t *testing.T) {
+	mgr, cleanup := setupTestDB(t)
+	defer cleanup()
+	task, err := mgr.CreateTask(validRequest())
+	require.NoError(t, err)
+	m := mgr.(*taskManager)
+	require.NoError(t, db.UpdateTaskStatus(m.database, task.ID, "building"))
+	require.NoError(t, mgr.CancelTask(task.ID))
+	status, err := mgr.GetTaskStatus(task.ID)
+	require.NoError(t, err)
+	require.NotNil(t, status.FinishedAt)
+	m.failTask(task.ID, "部署已中断")
+	after, err := mgr.GetTaskStatus(task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, status.FinishedAt, after.FinishedAt)
+	assert.Equal(t, "failed", after.Status)
 }
 
 func TestGetTaskStatus_NotFound(t *testing.T) {

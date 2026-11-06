@@ -208,12 +208,12 @@ func TestOIDCLoginPersistsThirtyDaySession(t *testing.T) {
 		f.now = original
 	}
 	// A whitelisted IP wins even when an SSO cookie is present.
-	f.cfg.Access.IPWhitelist = []string{"192.0.2.1"}
+	f.cfg.Access.Whitelist = []string{"192.0.2.1"}
 	body := check().Body.String()
 	assert.Contains(t, body, `"mode":"ip"`)
 	assert.Contains(t, body, "192.0.2.1")
 	assert.NotContains(t, body, "182****2780")
-	f.cfg.Access.IPWhitelist = nil
+	f.cfg.Access.Whitelist = nil
 	f.now = f.now.Add(sessionTTL)
 	assert.Contains(t, check().Body.String(), `"authenticated":false`)
 }
@@ -282,4 +282,49 @@ func TestCookieFlagsAndSubpath(t *testing.T) {
 	assert.Equal(t, "/cicd/", cookie.Path)
 	assert.Equal(t, "/cicd/", response.Header().Get("Location"))
 	assert.Equal(t, "", fmt.Sprint(response.Header().Get("Authorization")))
+}
+
+func TestOIDCWhitelistAuthorizationPreservesSession(t *testing.T) {
+	f := newOIDCFixture(t)
+	state, binding := f.begin(t)
+	response := f.callback(state, binding)
+	require.Equal(t, "/history", response.Header().Get("Location"))
+	cookie := cookieNamed(t, response, sessionCookie)
+	original, err := db.FindAuthSession(f.service.database, tokenHash(cookie.Value))
+	require.NoError(t, err)
+	check := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest("GET", path, nil)
+		request.RemoteAddr = "198.51.100.1:1234"
+		request.AddCookie(cookie)
+		result := httptest.NewRecorder()
+		f.router.ServeHTTP(result, request)
+		return result
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		body := check("/api/auth/session")
+		assert.Contains(t, body.Body.String(), `"authenticated":true`)
+		assert.Contains(t, body.Body.String(), `"authorized":false`)
+		assert.Contains(t, body.Body.String(), "182****2780")
+		assert.NotContains(t, body.Body.String(), original.Phone)
+		denied := check("/api/private")
+		assert.Equal(t, 403, denied.Code)
+		assert.Contains(t, denied.Body.String(), `"code":40301`)
+		assert.Empty(t, denied.Result().Cookies(), "denial must not clear or replace the session cookie")
+	}
+	// A new service reuses the same session without any new OIDC exchange.
+	f.service = NewService(f.service.database, func() *config.AppConfig { return f.cfg }, "")
+	f.service.now = func() time.Time { return f.now }
+	f.router = accessRouter(f.service)
+	f.cfg.Access.Whitelist = []string{"18223452780"}
+	assert.Equal(t, 200, check("/api/private").Code)
+	assert.Contains(t, check("/api/auth/session").Body.String(), `"authorized":true`)
+	f.cfg.Access.Whitelist = nil
+	assert.Equal(t, 403, check("/api/private").Code)
+	persisted, err := db.FindAuthSession(f.service.database, tokenHash(cookie.Value))
+	require.NoError(t, err)
+	assert.Equal(t, original, persisted)
+	assert.Equal(t, 1, f.tokenCalls)
+	f.now = original.ExpiresAt
+	assert.Equal(t, 401, check("/api/private").Code)
+	assert.Contains(t, check("/api/auth/session").Body.String(), `"authenticated":false`)
 }

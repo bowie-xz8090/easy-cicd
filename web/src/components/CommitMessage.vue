@@ -7,11 +7,11 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-const props = defineProps<{ message: string }>()
+const props = withDefaults(defineProps<{ message: string; limit?: number }>(), { limit: 100 })
 const expanded = ref(false)
 const characters = computed(() => Array.from(props.message || ''))
-const long = computed(() => characters.value.length > 100)
-const displayed = computed(() => !props.message ? '-' : expanded.value ? props.message : characters.value.slice(0, 100).join(''))
+const long = computed(() => characters.value.length > props.limit)
+const displayed = computed(() => !props.message ? '-' : expanded.value ? props.message : characters.value.slice(0, props.limit).join(''))
 watch(() => props.message, () => { expanded.value = false })
 </script>
 

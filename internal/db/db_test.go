@@ -178,6 +178,27 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "task not found")
 }
 
+func TestUpdateTaskStatus_PreservesTerminalTimeAndStatus(t *testing.T) {
+	for _, terminal := range []string{"success", "failed"} {
+		t.Run(terminal, func(t *testing.T) {
+			database := setupTestDB(t)
+			task := newTestTask()
+			require.NoError(t, CreateTask(database, task))
+			finished := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+			_, err := database.Exec("UPDATE deploy_tasks SET status = ?, finished_at = ? WHERE id = ?", terminal, finished.Format(time.RFC3339), task.ID)
+			require.NoError(t, err)
+			for _, lateStatus := range []string{"failed", "building", "success"} {
+				require.NoError(t, UpdateTaskStatus(database, task.ID, lateStatus))
+				got, err := GetTaskByID(database, task.ID)
+				require.NoError(t, err)
+				require.NotNil(t, got.FinishedAt)
+				assert.Equal(t, finished, *got.FinishedAt)
+				assert.Equal(t, terminal, got.Status)
+			}
+		})
+	}
+}
+
 func TestUpdateTaskLogs(t *testing.T) {
 	db := setupTestDB(t)
 	task := newTestTask()

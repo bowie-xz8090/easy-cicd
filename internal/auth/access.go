@@ -25,6 +25,7 @@ import (
 
 const (
 	RequiredCode      = 40101
+	ForbiddenCode     = 40301
 	principalKey      = "cicd.principal"
 	sessionCookie     = "cicd_session"
 	transactionCookie = "cicd_oidc_tx"
@@ -118,16 +119,21 @@ func ClientIP(request *http.Request, trusted []string) string {
 func (s *Service) resolve(c *gin.Context) (identity.Principal, *time.Time, error) {
 	cfg := s.config()
 	ip := ClientIP(c.Request, cfg.Access.TrustedProxies)
-	for _, raw := range cfg.Access.IPWhitelist {
-		address, err := netip.ParseAddr(raw)
-		if err == nil && ip != "" && address.Unmap().String() == ip {
-			return identity.Principal{Type: "ip", Value: ip, IP: ip}, nil, nil
-		}
+	if cfg.Access.AllowsIP(ip) {
+		return identity.Principal{Type: "ip", Value: ip, IP: ip}, nil, nil
 	}
 	raw, err := c.Cookie(sessionCookie)
-	if err != nil || raw == "" || s.database == nil {
+	if err != nil {
 		return identity.Principal{}, nil, nil
 	}
+	return s.resolveToken(raw, ip)
+}
+
+func (s *Service) resolveToken(raw, ip string) (identity.Principal, *time.Time, error) {
+	if raw == "" || s.database == nil {
+		return identity.Principal{}, nil, nil
+	}
+	cfg := s.config()
 	session, err := db.FindAuthSession(s.database, tokenHash(raw))
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Principal{}, nil, nil
@@ -145,6 +151,14 @@ func (s *Service) resolve(c *gin.Context) (identity.Principal, *time.Time, error
 	return identity.Principal{Type: "oidc", Value: phone, IP: ip}, &session.ExpiresAt, nil
 }
 
+func (s *Service) authorized(principal identity.Principal) bool {
+	access := s.config().Access
+	if principal.Type == "ip" {
+		return access.AllowsIP(principal.IP)
+	}
+	return principal.Type == "oidc" && access.AllowsPhone(principal.Value)
+}
+
 func (s *Service) handleSession(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	principal, expires, err := s.resolve(c)
@@ -160,7 +174,7 @@ func (s *Service) handleSession(c *gin.Context) {
 	if principal.Type != "" {
 		display = principal.Display()
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"authenticated": principal.Type != "", "mode": mode, "display_name": display, "expires_at": expires}})
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"authenticated": principal.Type != "", "authorized": s.authorized(principal), "mode": mode, "display_name": display, "expires_at": expires}})
 }
 
 func (s *Service) Middleware() gin.HandlerFunc {
@@ -173,6 +187,10 @@ func (s *Service) Middleware() gin.HandlerFunc {
 		}
 		if principal.Type == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": RequiredCode, "message": "请登录后再操作"})
+			return
+		}
+		if !s.authorized(principal) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": ForbiddenCode, "message": "没有访问权限"})
 			return
 		}
 		c.Set(principalKey, principal)

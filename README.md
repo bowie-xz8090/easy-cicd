@@ -13,6 +13,14 @@
 - **实时状态跟踪** — 页面每 5 秒轮询，实时展示部署进度
 - **部署历史** — 记录所有部署操作，支持按项目和环境筛选，可查看执行日志
 
+## 构建完整性与依赖缓存
+
+每次任务仍完整获取所选分支/标签，强制检出并校验所选提交；远端已删除的引用会被清除，避免误用旧分支。源码、旧产物和项目级编译缓存始终清理，同类构建保持串行，避免共享工作区和磁盘竞争。
+
+前端 pnpm 项目可以复用最近一次验证成功的 `node_modules` 安装结果，项目原有安装命令、工作区依赖检查与完整编译仍执行。缓存键包括全部已跟踪的 package.json、锁文件、workspace、npm 配置、补丁和 Node/pnpm/操作系统/架构/ABI 信息；带本地文件依赖或自定义安装钩子的仓库还按提交和环境失效。依赖清单变化、工具升级或上次构建失败后重新安装，继续复用现有 pnpm 下载 store。
+
+缓存构建使用 CI 锁文件校验；构建过程中修改锁文件或依赖清单会中止任务，不上传产物。Vite 等源码编译缓存不随依赖复用，产物每次重建。每个仓库只保留一份安装结果，元数据只存摘要，不保存配置凭据；不新增缓存服务或依赖。非 pnpm 项目保留原有清理和构建流程。
+
 ## 技术栈
 
 | 组件 | 技术 |
@@ -90,7 +98,7 @@ cp config.example.yaml config.yaml
 
 OIDC 登记信息保存在服务端 `oidc` 段，包括 `issuer`、`discovery_url`、`client_id`、`client_secret` 和 `redirect_uri`。`discovery_url` 必须是 Issuer 的 `/.well-known/openid-configuration` 地址。整个段落不通过配置 API 返回或修改；Client Secret 也禁止单独 JSON 序列化。
 
-`access.ip_whitelist` 为精确 IP 列表，实际地址仅在部署环境的 `config.yaml` 中维护，不在源码中固定，也不会自动扩大为整个网段。白名单优先免 SSO，右上角和部署记录显示完整 IP；其他来源必须通过 OIDC 登录，右上角及部署记录只显示脱敏手机号。OIDC 应用需允许 `openid phone` 范围，并在 ID Token 或 UserInfo 中披露 `phone_number`；带 `+86` 的号码会规范为国内 11 位手机号，无有效手机号不建立会话。
+`access.whitelist` 支持精确 IP 和 11 位手机号。配置管理中的“访问白名单”一行填写一项，保存会写入 `config.yaml` 并立即生效，仍需校验 `admin_token`。白名单 IP 优先免 SSO，右上角和部署记录显示完整 IP；其他来源需通过 OIDC 登录且手机号在白名单中，页面和部署记录仅显示脱敏手机号。未授权用户保留原有登录会话但无法读取业务数据，加入白名单后刷新即可访问，无需重新登录；移出后下次权限检查即被阻止。空白名单禁止所有业务访问。旧 `access.ip_whitelist` 兼容读取，保存后迁移为新字段；显式设置的新字段优先。OIDC 应用需允许 `openid phone` 范围，并在 ID Token 或 UserInfo 中披露 `phone_number`；带 `+86` 的号码会规范为国内 11 位手机号，无有效手机号不建立会话。
 
 默认以连接来源确定 IP，不信任请求自带的代理头。确有反向代理时，仅在 `access.trusted_proxies` 中登记可信代理的精确 IP 或 CIDR；代理必须覆盖或可靠追加转发头。白名单及代理配置随配置重载生效，`access` 整段只在服务端 YAML 中维护，不能由配置 API 覆盖。
 
@@ -691,3 +699,13 @@ curl -X POST "http://localhost:8080/api/config/reload?token=your-secure-random-s
 ```
 
 > **安全说明**：未设置 `admin_token` 时接口返回 403 不可用；token 错误返回 401。`admin_token` 不会出现在任何 API 响应中。
+
+### 通过 SSH 访问内网管理台
+
+`web_proxy` 在服务端登记固定目标，`config.example.yaml` 包含字段示例。环境访问接口只给匹配的链接增加 `proxy_url`；点击后，CICD 的 `/proxy/<环境>/<服务>/` 入口检查准入并跳转至该服务的代理端口，后端通过对应 SSH 连接访问目标。
+
+每个服务使用独立的浏览器来源并保留其原生 URL 路径，避免内网应用脚本访问 CICD API，以及不同环境的浏览器存储互相覆盖。代理公开地址须与 CICD 使用相同主机名和协议、不同端口，现有会话通过 HttpOnly Cookie 共享且不续期。使用应用路径前缀时，入口会为代理路径建立同等期限的专用 Cookie。
+
+SSH 凭据复用 `servers` 中的连接配置，必须提供可信的 `known_hosts_file`。每个网关仅能访问一个登记的目标，不接受浏览器提供的目标 URL。所有请求继续检查当前 IP/手机号白名单，写请求及 WebSocket 校验网关来源；不转发 CICD Cookie、管理令牌或伪造代理头。目标系统的 HTTP Cookie 单独命名，目标自己的登录和 HTTP Basic 验证保留。
+
+代理端口和主机密钥文件需要在 CICD 容器中发布/只读挂载；没有添加独立代理软件，也不需要修改目标服务。端口配置变更需要重启 CICD；目标、SSH 连接和准入配置仍从活动配置读取。HTTP 页面内的目标绝对地址和重定向会改为网关地址，流式响应及 WebSocket 继续转发。

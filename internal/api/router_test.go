@@ -144,8 +144,11 @@ func TestHandleClearDeployHistory(t *testing.T) {
 			return 3, nil
 		},
 	}
-	r := setupRouterWithTaskMgr(&mockGiteaClient{}, testConfig(), taskMgr)
-	req := httptest.NewRequest(http.MethodDelete, "/api/deploy/records", nil)
+	cfg := testConfig()
+	cfg.AdminToken = "test-admin"
+	r := setupRouterWithTaskMgr(&mockGiteaClient{}, cfg, taskMgr)
+	req := httptest.NewRequest(http.MethodDelete, "/api/config/history", nil)
+	req.Header.Set("Authorization", "Bearer test-admin")
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -164,14 +167,38 @@ func TestHandleClearDeployHistory_RejectsActiveTasks(t *testing.T) {
 			return 0, task.ErrDeploymentsInProgress
 		},
 	}
-	r := setupRouterWithTaskMgr(&mockGiteaClient{}, testConfig(), taskMgr)
-	req := httptest.NewRequest(http.MethodDelete, "/api/deploy/records", nil)
+	cfg := testConfig()
+	cfg.AdminToken = "test-admin"
+	r := setupRouterWithTaskMgr(&mockGiteaClient{}, cfg, taskMgr)
+	req := httptest.NewRequest(http.MethodDelete, "/api/config/history", nil)
+	req.Header.Set("Authorization", "Bearer test-admin")
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusConflict, w.Code)
 	assert.Contains(t, w.Body.String(), "进行中的部署任务")
+}
+
+func TestHistoryClearRequiresConfigurationAdmin(t *testing.T) {
+	clears := 0
+	cfg := testConfig()
+	cfg.AdminToken = "test-admin"
+	router := setupRouterWithTaskMgr(&mockGiteaClient{}, cfg, &mockTaskManager{clearHistoryFn: func() (int, error) { clears++; return 1, nil }})
+	for _, test := range []struct {
+		path, token string
+		status      int
+	}{
+		{"/api/config/history", "", 401}, {"/api/config/history", "wrong", 401},
+		{"/api/deploy/records", "test-admin", 404}, {"/api/config/history", "test-admin", 200},
+	} {
+		request := httptest.NewRequest("DELETE", test.path, nil)
+		request.Header.Set("Authorization", "Bearer "+test.token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		assert.Equal(t, test.status, response.Code, response.Body.String())
+	}
+	assert.Equal(t, 1, clears)
 }
 
 func testConfig() *config.AppConfig {
@@ -185,7 +212,7 @@ func testConfig() *config.AppConfig {
 		},
 	}
 	return &config.AppConfig{
-		Access:        config.AccessConfig{IPWhitelist: []string{"192.0.2.1"}},
+		Access:        config.AccessConfig{Whitelist: []string{"192.0.2.1"}},
 		ConfigVersion: config.CurrentVersion,
 		Servers: map[string]config.ServerConfig{
 			"dev-server": {

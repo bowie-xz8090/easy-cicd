@@ -6,6 +6,20 @@
 
     <template v-else>
       <section class="config-section">
+        <form class="whitelist-form" @submit.prevent="saveWhitelist">
+          <div class="section-heading">
+            <div>
+              <h2>访问白名单</h2>
+              <p>一行一个 IP 或 11 位手机号。IP 可免登录访问，手机号需要通过 SSO 登录；未列入白名单的账号没有访问权限。</p>
+            </div>
+            <button class="save-btn" type="submit" :disabled="savingWhitelist">{{ savingWhitelist ? '保存中…' : '保存白名单' }}</button>
+          </div>
+          <label for="access-whitelist">IP / 手机号</label>
+          <textarea id="access-whitelist" v-model="whitelistText" rows="8" spellcheck="false" :disabled="savingWhitelist" />
+          <p>保存后写入 config.yaml 并立即生效。清空列表会禁止所有用户访问。</p>
+        </form>
+      </section>
+      <section class="config-section">
         <div>
           <h2>环境服务器</h2>
           <p>通常无需修改；这里只决定每个环境可以选择哪些服务器。</p>
@@ -279,6 +293,15 @@
           </button>
         </div>
       </section>
+      <section class="config-section">
+        <div class="section-heading">
+          <div>
+            <h2>部署记录管理</h2>
+            <p>清空全部部署记录及日志；存在进行中的部署任务时无法清空。</p>
+          </div>
+          <button class="remove-btn clear-history-btn" type="button" :disabled="clearingHistory || !props.adminToken" @click="clearHistory">{{ clearingHistory ? '清空中…' : '清空部署历史' }}</button>
+        </div>
+      </section>
     </template>
 
     <div v-if="addServerDialog" class="dialog-backdrop" @click.self="closeAddServerDialog">
@@ -397,8 +420,10 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
   fetchEditableConfig,
+  clearDeployHistory,
   updateEnvironmentAccess,
   updateProjectBuildConfig,
+  updateWhitelist,
   type ArtifactConfig,
   type ComponentBuildConfig,
   type DeploymentConfig,
@@ -410,6 +435,7 @@ import {
   type ServerSummary,
   type UnitEnvironmentConfig,
 } from '../api/index'
+import { refreshSession } from '../auth'
 
 const props = defineProps<{ adminToken: string }>()
 const standardEnvironments = [
@@ -434,6 +460,9 @@ const selectedEnvironment = ref<string | null>(null)
 const loading = ref(true)
 const savingEnvironment = ref(false)
 const savingProjects = ref(false)
+const savingWhitelist = ref(false)
+const clearingHistory = ref(false)
+const whitelistText = ref('')
 const errorMessage = ref('')
 const successMessage = ref('')
 const environmentDraft = reactive<EnvironmentAccessConfig>({
@@ -872,12 +901,45 @@ async function loadConfig() {
     environments.value = loaded.environments
     projects.value = loaded.projects
     serverOptions.value = loaded.servers
+    whitelistText.value = (loaded.whitelist ?? []).join('\n')
     const first = Object.keys(projects.value)[0]
     if (first) selectProject(first)
   } catch (error: unknown) {
     errorMessage.value = `获取配置失败：${error instanceof Error ? error.message : '未知错误'}`
   } finally {
     loading.value = false
+  }
+}
+
+async function saveWhitelist() {
+  savingWhitelist.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const entries = Array.from(new Set(whitelistText.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean)))
+    const saved = await updateWhitelist(props.adminToken, entries)
+    whitelistText.value = saved.whitelist.join('\n')
+    successMessage.value = '白名单已写入 config.yaml 并生效'
+    await refreshSession()
+  } catch (error: unknown) {
+    errorMessage.value = `保存白名单失败：${error instanceof Error ? error.message : '未知错误'}`
+  } finally {
+    savingWhitelist.value = false
+  }
+}
+
+async function clearHistory() {
+  if (!props.adminToken || clearingHistory.value || !window.confirm('是否确认清空全部部署历史及日志？')) return
+  clearingHistory.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const result = await clearDeployHistory(props.adminToken)
+    successMessage.value = `已清空 ${result.deleted} 条部署记录及日志`
+  } catch (error: unknown) {
+    errorMessage.value = `清空失败：${error instanceof Error ? error.message : '未知错误'}`
+  } finally {
+    clearingHistory.value = false
   }
 }
 
@@ -930,6 +992,7 @@ button { cursor:pointer; }
 button:disabled { opacity:.5; cursor:not-allowed; }
 .page-heading { margin-bottom:20px; }
 .config-section { padding:20px 0 26px; border-top:1px solid #e3e8f0; }
+.whitelist-form { display:grid; gap:12px; }
 .section-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .compact-heading { margin-top:18px; }
 .environment-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }

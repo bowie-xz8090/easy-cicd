@@ -18,6 +18,7 @@ import (
 	"auto-deploy-platform/internal/deployer"
 	"auto-deploy-platform/internal/gitea"
 	"auto-deploy-platform/internal/task"
+	"auto-deploy-platform/internal/webproxy"
 
 	"github.com/gin-gonic/gin"
 )
@@ -69,8 +70,23 @@ func main() {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": -1, "message": "服务暂时不可用"})
 	}))
 	basePath := resolveBasePath(cfg)
-	handler.SetAccessService(auth.NewService(database, cfgManager.Get, basePath))
+	accessService := auth.NewService(database, cfgManager.Get, basePath)
+	handler.SetAccessService(accessService)
 	handler.RegisterRoutesWithBasePath(r, basePath)
+	proxyService := webproxy.New(cfgManager.Get, basePath)
+	defer proxyService.Close()
+	proxyService.RegisterLauncher(r, accessService)
+	for environment, routes := range cfg.WebProxy.Routes {
+		for key, route := range routes {
+			gateway := &http.Server{Addr: fmt.Sprintf(":%d", route.ListenPort), Handler: proxyService.Gateway(environment, key, accessService), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+			go func(environment, key string, server *http.Server) {
+				log.Printf("Starting registered web gateway %s/%s on %s", environment, key, server.Addr)
+				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Fatalf("Web gateway failed to start: %v", err)
+				}
+			}(environment, key, gateway)
+		}
+	}
 
 	// Serve frontend static files in production mode
 	distDir := "./web/dist"
@@ -78,6 +94,7 @@ func main() {
 		indexFile := distDir + "/index.html"
 		r.Use(frontendAssetCacheHeaders(basePath))
 		r.Static(joinAppPath(basePath, "/assets"), distDir+"/assets")
+		registerPublicIcons(r, basePath, distDir)
 		r.GET(joinAppPath(basePath, "/"), func(c *gin.Context) {
 			serveFrontendIndex(c, indexFile, basePath)
 		})
@@ -116,6 +133,12 @@ func main() {
 	log.Printf("Config file: %s (supports dynamic reload via API)", configPath)
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
+	}
+}
+
+func registerPublicIcons(router *gin.Engine, basePath, distDir string) {
+	for _, name := range []string{"favicon.ico", "favicon-16.png", "favicon-32.png", "apple-touch-icon.png"} {
+		router.StaticFile(joinAppPath(basePath, "/"+name), distDir+"/"+name)
 	}
 }
 

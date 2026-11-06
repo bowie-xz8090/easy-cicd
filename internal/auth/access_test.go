@@ -24,7 +24,7 @@ func accessRouter(service *Service) *gin.Engine {
 }
 
 func TestWhitelistBoundariesAndForwardedHeaders(t *testing.T) {
-	cfg := &config.AppConfig{Access: config.AccessConfig{IPWhitelist: []string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5", "192.0.2.6", "192.0.2.7", "192.0.2.8", "192.0.2.9", "192.0.2.10"}}}
+	cfg := &config.AppConfig{Access: config.AccessConfig{Whitelist: []string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5", "192.0.2.6", "192.0.2.7", "192.0.2.8", "192.0.2.9", "192.0.2.10"}}}
 	service := NewService(nil, func() *config.AppConfig { return cfg }, "")
 	router := accessRouter(service)
 	for _, test := range []struct {
@@ -49,7 +49,7 @@ func TestWhitelistBoundariesAndForwardedHeaders(t *testing.T) {
 		})
 	}
 	// The service must read the current whitelist for every request.
-	cfg.Access.IPWhitelist = nil
+	cfg.Access.Whitelist = nil
 	request := httptest.NewRequest("GET", "/api/private", nil)
 	request.RemoteAddr = "192.0.2.1:1234"
 	response := httptest.NewRecorder()
@@ -77,7 +77,7 @@ func TestClientIPExplicitTrustedProxy(t *testing.T) {
 }
 
 func TestWriteRequestGuard(t *testing.T) {
-	cfg := &config.AppConfig{Access: config.AccessConfig{IPWhitelist: []string{"192.0.2.1"}}, OIDC: config.OIDCConfig{RedirectURI: "http://cicd.example/api/auth/oidc/callback"}}
+	cfg := &config.AppConfig{Access: config.AccessConfig{Whitelist: []string{"192.0.2.1"}}, OIDC: config.OIDCConfig{RedirectURI: "http://cicd.example/api/auth/oidc/callback"}}
 	router := accessRouter(NewService(nil, func() *config.AppConfig { return cfg }, ""))
 	for _, test := range []struct {
 		header, origin, fetch string

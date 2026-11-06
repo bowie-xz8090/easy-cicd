@@ -42,7 +42,7 @@ export interface Environment {
   targets: DeploymentTarget[]
   user_url: string
   admin_url: string
-  extra: { label: string; url: string }[] | null
+  extra: { label: string; url: string; proxy_url?: string }[] | null
 }
 
 export interface DeploymentTarget {
@@ -82,6 +82,7 @@ export interface TaskStatus {
   environment: string
   created_at: string
   updated_at: string
+  finished_at?: string | null
 }
 
 export interface TaskLogs {
@@ -109,7 +110,7 @@ export interface DeployRecord {
   environment: string
   status: string
   created_at: string
-  finished_at: string
+  finished_at: string | null
 }
 
 export interface RecordFilter {
@@ -128,6 +129,7 @@ export interface RecordListResponse {
 }
 
 export interface EditableConfig {
+  whitelist: string[]
   environments: Record<string, EditableEnvironment>
   projects: ProjectBuildConfig
   servers: ServerSummary[]
@@ -230,7 +232,7 @@ api.interceptors.response.use(
   (response) => {
     const body = response.data
     if (body.code !== 0) {
-      if (body.code === 40101) window.dispatchEvent(new Event('cicd-login-required'))
+      notifyAccessError(body.code)
       throw new ApiError(body.code, body.message || '请求失败')
     }
     return body.data
@@ -239,17 +241,23 @@ api.interceptors.response.use(
     if (error instanceof ApiError) {
       throw error
     }
-    if (error.response?.data?.code === 40101) window.dispatchEvent(new Event('cicd-login-required'))
+    notifyAccessError(error.response?.data?.code)
     const message =
       error.response?.data?.message || error.message || '网络请求失败'
     throw new ApiError(error.response?.data?.code ?? -1, message)
   },
 )
 
+function notifyAccessError(code: number) {
+  if (code === 40101) window.dispatchEvent(new Event('cicd-login-required'))
+  if (code === 40301) window.dispatchEvent(new Event('cicd-access-denied'))
+}
+
 // --- API Functions ---
 
 export interface AccessSession {
   authenticated: boolean
+  authorized: boolean
   mode: 'ip' | 'oidc' | 'anonymous'
   display_name: string
   expires_at: string | null
@@ -325,8 +333,8 @@ export async function fetchRecords(
   }) as unknown as RecordListResponse
 }
 
-export async function clearDeployHistory(): Promise<{ deleted: number }> {
-  return api.delete('/api/deploy/records') as unknown as { deleted: number }
+export async function clearDeployHistory(adminToken: string): Promise<{ deleted: number }> {
+  return api.delete('/api/config/history', { headers: adminHeaders(adminToken) }) as unknown as { deleted: number }
 }
 
 function adminHeaders(adminToken: string) {
@@ -335,6 +343,10 @@ function adminHeaders(adminToken: string) {
 
 export async function fetchEditableConfig(adminToken: string): Promise<EditableConfig> {
   return api.get('/api/config/editor', { headers: adminHeaders(adminToken) }) as unknown as EditableConfig
+}
+
+export async function updateWhitelist(adminToken: string, whitelist: string[]): Promise<{ whitelist: string[] }> {
+  return api.put('/api/config/whitelist', { whitelist }, { headers: adminHeaders(adminToken) }) as unknown as { whitelist: string[] }
 }
 
 export async function updateEditableConfig(

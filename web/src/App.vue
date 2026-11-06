@@ -1,8 +1,11 @@
 <template>
   <div id="app">
     <header class="app-header">
-      <h2>{{ siteTitle }}</h2>
-      <nav v-if="accessSession?.authenticated" class="tabs" aria-label="主导航">
+      <div class="app-brand">
+        <img class="app-logo" :src="logoURL" alt="" width="36" height="36" />
+        <h2>{{ siteTitle }}</h2>
+      </div>
+      <nav v-if="canAccess" class="tabs" aria-label="主导航">
         <button :class="{ active: activeTab === 'deploy' }" @click="activeTab = 'deploy'">部署</button>
         <button :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">部署历史</button>
         <button :class="{ active: activeTab === 'config' }" @click="openConfigTab">配置管理</button>
@@ -21,6 +24,15 @@
         </template>
       </section>
     </main>
+    <main v-else-if="!canAccess" class="login-gate">
+      <div class="dialog-backdrop">
+        <section class="login-card" role="alertdialog" aria-modal="true" aria-labelledby="denied-heading" aria-describedby="denied-description">
+          <h1 id="denied-heading">没有访问权限</h1>
+          <p id="denied-description">当前账号不在访问白名单内，请联系管理员。加入白名单后刷新即可访问，无需重新登录。</p>
+          <button class="primary-btn" :disabled="accessLoading" @click="refreshSession">{{ accessLoading ? '检查中…' : '刷新权限' }}</button>
+        </section>
+      </div>
+    </main>
     <main v-else-if="activeTab === 'deploy'" class="app-layout">
       <div class="panel-left">
         <DeployPage @deployed="onDeployed" />
@@ -37,7 +49,7 @@
       <ConfigPage :admin-token="adminToken" />
     </main>
 
-    <div v-if="showAuthDialog && accessSession?.authenticated" class="dialog-backdrop" @click.self="closeAuthDialog">
+    <div v-if="showAuthDialog && canAccess" class="dialog-backdrop" @click.self="closeAuthDialog">
       <form class="auth-dialog" @submit.prevent="verifyAdminToken">
         <h3>配置管理验证</h3>
         <label for="admin-token-input">admin_token</label>
@@ -69,13 +81,15 @@ import DeployPage from './views/DeployPage.vue'
 import HistoryPage from './views/HistoryPage.vue'
 import ConfigPage from './views/ConfigPage.vue'
 import EnvironmentLinks from './components/EnvironmentLinks.vue'
+import logoURL from './assets/cicd-logo.png'
 import { fetchEditableConfig, fetchSiteInfo, oidcLoginURL } from './api/index'
-import { accessSession, accessLoading, accessError, refreshSession, requireLogin } from './auth'
+import { accessSession, accessLoading, accessError, refreshSession, requireLogin, denyAccess } from './auth'
 
 type Tab = 'deploy' | 'history' | 'config'
 
 const historyRef = ref<InstanceType<typeof HistoryPage> | null>(null)
 const siteTitle = ref('自动部署平台')
+const canAccess = computed(() => !!accessSession.value?.authenticated && accessSession.value.authorized)
 const activeTab = ref<Tab>('deploy')
 const adminToken = ref('')
 const authError = ref('')
@@ -95,6 +109,11 @@ function onLoginRequired() {
   activeTab.value = 'deploy'
 }
 
+function onAccessDenied() {
+  denyAccess()
+  void refreshSession()
+}
+
 function scheduleExpiry() {
   clearTimeout(expiryTimer)
   const expires = accessSession.value?.expires_at
@@ -107,7 +126,7 @@ function scheduleExpiry() {
 
 function checkOnFocus() { void refreshSession() }
 watch(accessSession, (session) => {
-  if (!session?.authenticated) {
+  if (!session?.authenticated || !session.authorized) {
     showAuthDialog.value = false
     adminToken.value = ''
     tokenInput.value = ''
@@ -118,6 +137,7 @@ watch(accessSession, (session) => {
 
 onMounted(async () => {
   window.addEventListener('cicd-login-required', onLoginRequired)
+  window.addEventListener('cicd-access-denied', onAccessDenied)
   window.addEventListener('focus', checkOnFocus)
   const current = new URL(window.location.href)
   if (current.searchParams.has('auth_error')) {
@@ -137,6 +157,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('cicd-login-required', onLoginRequired)
+  window.removeEventListener('cicd-access-denied', onAccessDenied)
   window.removeEventListener('focus', checkOnFocus)
   clearTimeout(expiryTimer)
 })
@@ -199,7 +220,22 @@ function onDeployed() {
   border-bottom: 1px solid #e5e7eb;
 }
 
-.app-header h2 {
+.app-brand {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-logo {
+  display: block;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.app-brand h2 {
   flex: 0 0 auto;
   margin: 0;
   font-size: 1.1rem;
@@ -246,10 +282,12 @@ function onDeployed() {
 
 .panel-right {
   width: 60%;
+  min-width: 0;
   overflow-y: auto;
 }
 
 .tab-content {
+  min-width: 0;
   min-height: calc(100vh - 56px);
   overflow-y: auto;
 }
@@ -350,7 +388,7 @@ function onDeployed() {
     padding: 8px 16px 0;
   }
 
-  .app-header h2 {
+  .app-brand {
     width: 100%;
     margin-bottom: 8px;
   }
@@ -362,6 +400,7 @@ function onDeployed() {
   .panel-left,
   .panel-right {
     width: 100%;
+    min-width: 0;
   }
 
   .panel-left {

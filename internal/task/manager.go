@@ -53,17 +53,18 @@ type DeployRequest struct {
 
 // TaskStatus represents the current status of a deployment task.
 type TaskStatus struct {
-	TaskID      string    `json:"task_id"`
-	Status      string    `json:"status"`
-	ProjectName string    `json:"project_name"`
-	Component   string    `json:"component"`
-	SubProject  string    `json:"sub_project,omitempty"`
-	Target      string    `json:"target"`
-	Server      string    `json:"server"`
-	Branch      string    `json:"branch"`
-	Environment string    `json:"environment"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	TaskID      string     `json:"task_id"`
+	Status      string     `json:"status"`
+	ProjectName string     `json:"project_name"`
+	Component   string     `json:"component"`
+	SubProject  string     `json:"sub_project,omitempty"`
+	Target      string     `json:"target"`
+	Server      string     `json:"server"`
+	Branch      string     `json:"branch"`
+	Environment string     `json:"environment"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	FinishedAt  *time.Time `json:"finished_at"`
 }
 
 // DeployRecord represents a deployment record for list results.
@@ -432,7 +433,8 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 
 	// Fetch and check out the exact ref selected by the user. The selected
 	// commit is verified as well so the UI and build cannot silently diverge.
-	actualCommit, err := m.builder.CloneOrPull(repoURL, task.Branch, task.RefType, task.CommitID, workDir)
+	workspaceOptions := builder.WorkspaceOptions{PreserveDependencies: buildType == frontendBuild}
+	actualCommit, err := m.builder.CloneOrPull(repoURL, task.Branch, task.RefType, task.CommitID, workDir, workspaceOptions)
 	if err != nil {
 		m.failTask(task.ID, fmt.Sprintf("代码拉取失败: %v", err))
 		return
@@ -440,11 +442,11 @@ func (m *taskManager) executeDeployment(ctx context.Context, task *db.DeployTask
 	m.appendLog(task.ID, "cloning", fmt.Sprintf("代码拉取完成，实际构建提交: %s", actualCommit))
 
 	defer func() {
-		if err := m.builder.CleanWorkDir(workDir); err != nil {
+		if err := m.builder.CleanWorkDir(workDir, workspaceOptions); err != nil {
 			m.appendLog(task.ID, "cleanup", fmt.Sprintf("cleaning build cache failed: %v", err))
 			return
 		}
-		m.appendLog(task.ID, "cleanup", "cleaned build outputs and project dependency cache")
+		m.appendLog(task.ID, "cleanup", "已清理构建产物及临时文件；仅保留验证成功的前端依赖缓存")
 	}()
 
 	// --- Stage 2: Building ---
@@ -588,6 +590,7 @@ func (m *taskManager) GetTaskStatus(taskID string) (*TaskStatus, error) {
 		Environment: task.Environment,
 		CreatedAt:   task.CreatedAt,
 		UpdatedAt:   task.UpdatedAt,
+		FinishedAt:  task.FinishedAt,
 	}, nil
 }
 

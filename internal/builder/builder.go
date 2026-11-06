@@ -18,12 +18,17 @@ import (
 type Builder interface {
 	// CloneOrPull clones or refreshes a repository, checks out the exact branch
 	// or tag requested by the user, and verifies the selected commit when set.
-	CloneOrPull(repoURL, ref, refType, expectedCommit, workDir string) (string, error)
+	CloneOrPull(repoURL, ref, refType, expectedCommit, workDir string, options ...WorkspaceOptions) (string, error)
 
 	// Build executes the given build command in workDir with BUILD_ENV set to env.
 	// Returns the combined stdout/stderr output on success, or an error with output on failure.
 	Build(ctx context.Context, workDir string, buildCmd string, env string, onOutput func(string)) (string, error)
-	CleanWorkDir(workDir string) error
+	CleanWorkDir(workDir string, options ...WorkspaceOptions) error
+}
+
+// WorkspaceOptions 只允许保留已验证的依赖目录，源码与构建产物始终清理。
+type WorkspaceOptions struct {
+	PreserveDependencies bool
 }
 
 // builder is the concrete implementation of Builder using os/exec to run git and shell commands.
@@ -36,13 +41,13 @@ func NewBuilder() Builder {
 
 // CloneOrPull clones the repository into workDir if it doesn't exist,
 // or fetches and checks out the specified branch if workDir already exists.
-func (b *builder) CloneOrPull(repoURL, ref, refType, expectedCommit, workDir string) (string, error) {
+func (b *builder) CloneOrPull(repoURL, ref, refType, expectedCommit, workDir string, options ...WorkspaceOptions) (string, error) {
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		if err := b.cloneRepo(repoURL, workDir); err != nil {
 			return "", err
 		}
 	}
-	return b.checkoutRef(repoURL, ref, refType, expectedCommit, workDir)
+	return b.checkoutRef(repoURL, ref, refType, expectedCommit, workDir, options...)
 }
 
 // cloneRepo creates the checkout without selecting a potentially ambiguous ref.
@@ -58,7 +63,7 @@ func (b *builder) cloneRepo(repoURL, workDir string) error {
 }
 
 // checkoutRef fetches and checks out an explicitly typed branch or tag.
-func (b *builder) checkoutRef(repoURL, ref, refType, expectedCommit, workDir string) (string, error) {
+func (b *builder) checkoutRef(repoURL, ref, refType, expectedCommit, workDir string, options ...WorkspaceOptions) (string, error) {
 	if repoURL != "" {
 		remoteCmd := exec.Command("git", "remote", "set-url", "origin", repoURL)
 		remoteCmd.Dir = workDir
@@ -72,15 +77,17 @@ func (b *builder) checkoutRef(repoURL, ref, refType, expectedCommit, workDir str
 	// Ensure the remote fetch refspec covers all branches and tags.
 	configCmd := exec.Command("git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 	configCmd.Dir = workDir
-	configCmd.Run() // ignore errors
+	if err := configCmd.Run(); err != nil {
+		return "", fmt.Errorf("git fetch configuration failed: %w", err)
+	}
 
-	// git clean -fd — remove untracked files/dirs left by previous builds
-	cleanCmd := exec.Command("git", "clean", "-fdx")
-	cleanCmd.Dir = workDir
-	cleanCmd.Run() // ignore errors
+	if err := b.CleanWorkDir(workDir, options...); err != nil {
+		return "", err
+	}
 
 	// Force-refresh remote branches and tags so moved tags do not block deployments.
-	fetchCmd := exec.Command("git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*")
+	// 清除远端已删除的引用，避免把已删除分支的旧代码误当作最新版本。
+	fetchCmd := exec.Command("git", "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*")
 	fetchCmd.Dir = workDir
 	var fetchStderr bytes.Buffer
 	fetchCmd.Stderr = &fetchStderr
@@ -132,8 +139,13 @@ func (b *builder) checkoutRef(repoURL, ref, refType, expectedCommit, workDir str
 
 // CleanWorkDir removes generated files from an existing Git checkout while
 // retaining tracked source files and Git metadata for the next deployment.
-func (b *builder) CleanWorkDir(workDir string) error {
-	cmd := exec.Command("git", "clean", "-fdx")
+func (b *builder) CleanWorkDir(workDir string, options ...WorkspaceOptions) error {
+	args := []string{"clean", "-fdx"}
+	if len(options) > 0 && options[0].PreserveDependencies && hasDependencyCache(workDir) {
+		// 仅保留 node_modules；旧 dist、临时源码和项目级编译缓存全部删除。
+		args = append(args, "-e", "node_modules/")
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -180,11 +192,6 @@ func (b *builder) Build(ctx context.Context, workDir string, buildCmd string, en
 		return "", fmt.Errorf("build command canceled: %w", ctx.Err())
 	}
 
-	name, args := shellCommand(buildCmd)
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), fmt.Sprintf("BUILD_ENV=%s", env))
-
 	var output bytes.Buffer
 	var outputMu sync.Mutex
 	appendOutput := func(line string) {
@@ -195,6 +202,21 @@ func (b *builder) Build(ctx context.Context, workDir string, buildCmd string, en
 		if onOutput != nil {
 			onOutput(line)
 		}
+	}
+
+	cache, err := prepareDependencyCache(ctx, workDir, buildCmd, env, appendOutput)
+	if err != nil {
+		return output.String(), fmt.Errorf("dependency cache preparation failed: %w", err)
+	}
+	name, args := shellCommand(buildCmd)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), fmt.Sprintf("BUILD_ENV=%s", env))
+	if cache != nil {
+		// pnpm 在 CI 中校验锁文件，仍执行项目原有安装命令及所有生命周期脚本。
+		cmd.Env = setEnv(cmd.Env, "CI", "true")
+		cmd.Env = setEnv(cmd.Env, "npm_config_frozen_lockfile", "true")
+		cmd.Env = setEnv(cmd.Env, "npm_config_prefer_offline", "true")
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -227,6 +249,11 @@ func (b *builder) Build(ctx context.Context, workDir string, buildCmd string, en
 			return outputText, fmt.Errorf("build command canceled: %w", ctx.Err())
 		}
 		return outputText, fmt.Errorf("build command failed: %w", err)
+	}
+	if cache != nil {
+		if err := cache.commit(); err != nil {
+			return outputText, fmt.Errorf("dependency cache validation failed: %w", err)
+		}
 	}
 
 	return outputText, nil

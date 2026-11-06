@@ -86,7 +86,8 @@ func TestConfigResponsesExcludeSecrets(t *testing.T) {
 				}
 				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 				assert.Zero(t, body.Code)
-				assert.Len(t, body.Data, 3)
+				assert.Len(t, body.Data, 4)
+				assert.Contains(t, body.Data, "whitelist")
 				assert.Contains(t, body.Data, "environments")
 				assert.Contains(t, body.Data, "projects")
 				assert.Contains(t, body.Data, "servers")
@@ -169,4 +170,27 @@ func TestEditableConfigUpdatePreservesAllCredentials(t *testing.T) {
 	assert.Equal(t, original.Gitea.Token, manager.Get().Gitea.Token)
 	assert.Equal(t, original.OIDC, manager.Get().OIDC)
 	assert.Equal(t, original.Access, manager.Get().Access)
+}
+
+func TestConfigJSONCannotReplaceServerManagedWebProxy(t *testing.T) {
+	router, manager := setupConfigSecurityRouter(t)
+	cfg := manager.Get()
+	cfg.WebProxy = config.WebProxyConfig{KnownHostsFile: "/private/known_hosts", Routes: map[string]map[string]config.WebProxyRoute{"dev": {"nacos": {Target: "http://192.0.2.10:8848/nacos/", SSHServer: "dev-server", ListenPort: 8083, PublicURL: "https://deploy.example.com:8083"}}}}
+	require.NoError(t, manager.Update(cfg))
+	data, err := json.Marshal(manager.Get())
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &payload))
+	payload["web_proxy"] = map[string]interface{}{"known_hosts_file": "/attacker/keys"}
+	data, err = json.Marshal(payload)
+	require.NoError(t, err)
+	request := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(data))
+	request.Header.Set("Authorization", "Bearer "+cfg.AdminToken)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, 200, response.Code, response.Body.String())
+	assert.Equal(t, cfg.WebProxy, manager.Get().WebProxy)
+	assert.NotContains(t, response.Body.String(), "known_hosts")
+	assert.NotContains(t, response.Body.String(), "web_proxy")
 }

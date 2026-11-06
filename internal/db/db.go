@@ -254,11 +254,13 @@ func UpdateTaskStatus(db *sql.DB, id string, status string) error {
 	var query string
 	var args []interface{}
 
+	// A worker may report failure again after cancellation. Preserve the first
+	// terminal state and timestamp instead of moving the recorded end time.
 	if status == "success" || status == "failed" {
-		query = `UPDATE deploy_tasks SET status = ?, updated_at = ?, finished_at = ? WHERE id = ?`
+		query = `UPDATE deploy_tasks SET status = CASE WHEN finished_at IS NULL THEN ? ELSE status END, updated_at = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ?`
 		args = []interface{}{status, now, now, id}
 	} else {
-		query = `UPDATE deploy_tasks SET status = ?, updated_at = ? WHERE id = ?`
+		query = `UPDATE deploy_tasks SET status = CASE WHEN finished_at IS NULL THEN ? ELSE status END, updated_at = ? WHERE id = ?`
 		args = []interface{}{status, now, id}
 	}
 

@@ -21,6 +21,7 @@ type Handler struct {
 	cfgManager  *config.Manager
 	taskManager task.TaskManager
 	access      *auth.Service
+	basePath    string
 }
 
 func (h *Handler) SetAccessService(service *auth.Service) { h.access = service }
@@ -59,6 +60,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 // RegisterRoutesWithBasePath registers API routes under an optional application base path.
 func (h *Handler) RegisterRoutesWithBasePath(r *gin.Engine, basePath string) {
+	h.basePath = basePath
 	// Forwarding headers are interpreted only by the access service's explicit proxy policy.
 	_ = r.SetTrustedProxies(nil)
 	if h.access == nil {
@@ -77,7 +79,6 @@ func (h *Handler) RegisterRoutesWithBasePath(r *gin.Engine, basePath string) {
 
 		// Deploy routes: register /deploy/records BEFORE /:id routes to avoid conflicts.
 		api.GET("/deploy/records", h.handleDeployRecords)
-		api.DELETE("/deploy/records", h.handleClearDeployHistory)
 		api.POST("/deploy", h.handleDeploy)
 		api.POST("/deploy/:id/cancel", h.handleDeployCancel)
 		api.GET("/deploy/:id/status", h.handleDeployStatus)
@@ -89,6 +90,8 @@ func (h *Handler) RegisterRoutesWithBasePath(r *gin.Engine, basePath string) {
 		{
 			configGroup.GET("/editor", h.handleGetEditableConfig)
 			configGroup.PUT("/editor", h.handleUpdateEditableConfig)
+			configGroup.PUT("/whitelist", h.handleUpdateWhitelist)
+			configGroup.DELETE("/history", h.handleClearDeployHistory)
 			configGroup.PUT("/projects", h.handleUpdateProjects)
 			configGroup.PUT("/environments/:key", h.handleUpdateEnvironmentAccess)
 			configGroup.PUT("", h.handleUpdateConfig)
@@ -282,8 +285,9 @@ type TargetItem struct {
 
 // LinkItem represents a custom link in the API response.
 type LinkItem struct {
-	Label string `json:"label"`
-	URL   string `json:"url"`
+	Label    string `json:"label"`
+	URL      string `json:"url"`
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // toLinkItems converts config EnvLink slice to API LinkItem slice.
@@ -335,6 +339,9 @@ func (h *Handler) handleListEnvironments(c *gin.Context) {
 			UserURL:      envCfg.Links.UserURL,
 			AdminURL:     envCfg.Links.AdminURL,
 			Extra:        toLinkItems(envCfg.Links.Extra),
+		}
+		for index := range item.Extra {
+			item.Extra[index].ProxyURL = cfg.ProxyLink(key, item.Extra[index].URL, h.basePath)
 		}
 		if projectName != "" {
 			unitEnv, configured := unitEnvironments[key]
@@ -614,6 +621,7 @@ func (h *Handler) handleClearDeployHistory(c *gin.Context) {
 // EditableConfig contains the configuration sections that can be safely edited
 // from the web UI. Connection credentials are intentionally excluded.
 type EditableConfig struct {
+	Whitelist    []string                        `json:"whitelist"`
 	Environments map[string]config.EnvConfig     `json:"environments"`
 	Projects     map[string]config.ProjectConfig `json:"projects"`
 	Servers      []ServerSummary                 `json:"servers"`
@@ -640,6 +648,7 @@ func editableConfig(cfg *config.AppConfig) EditableConfig {
 	}
 	sort.SliceStable(servers, func(i, j int) bool { return servers[i].Key < servers[j].Key })
 	return EditableConfig{
+		Whitelist:    append([]string{}, cfg.Access.Whitelist...),
 		Environments: cfg.Environments,
 		Projects:     cfg.Projects,
 		Servers:      servers,
@@ -658,6 +667,27 @@ type EnvironmentAccessConfig struct {
 func (h *Handler) handleGetEditableConfig(c *gin.Context) {
 	cfg := h.getLatestConfig()
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": editableConfig(cfg)})
+}
+
+// Whitelist editing requires both platform admission and the existing admin
+// credential. It never accepts OIDC secrets or proxy-trust configuration.
+func (h *Handler) handleUpdateWhitelist(c *gin.Context) {
+	if h.cfgManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "message": "配置管理器未初始化，不支持动态修改"})
+		return
+	}
+	var payload struct {
+		Whitelist *[]string `json:"whitelist"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || payload.Whitelist == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "message": "请提供白名单列表，每项为 IP 或 11 位手机号"})
+		return
+	}
+	if err := h.cfgManager.UpdateWhitelist(*payload.Whitelist); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "message": "白名单保存失败：" + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"whitelist": h.cfgManager.Get().Access.Whitelist}})
 }
 
 // handleUpdateEditableConfig merges edited environment and project settings
@@ -879,6 +909,7 @@ func (h *Handler) handleUpdateConfig(c *gin.Context) {
 	newCfg.Gitea.Token = current.Gitea.Token
 	newCfg.OIDC = current.OIDC
 	newCfg.Access = current.Access
+	newCfg.WebProxy = current.WebProxy
 	for key, server := range newCfg.Servers {
 		if existing, ok := current.Servers[key]; ok {
 			server.Password = existing.Password
